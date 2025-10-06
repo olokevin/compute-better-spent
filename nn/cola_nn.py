@@ -11,8 +11,8 @@ from fvcore.nn import FlopCountAnalysis
 from torchinfo import summary
 from sympy import factorint
 from cola.ops import Dense
-from ops.operators import TT, FasterBTT, Monarch
-from ops.operators import BTT, Permutation
+from ops.operators import TT, FasterBTT, Monarch, FasterBTTActv
+from ops.operators import BTT, Permutation, LowRankActv
 
 try:
     from torchdistx.deferred_init import deferred_init, materialize_module
@@ -179,6 +179,44 @@ def build_low_rank(d_in, d_out, rank_frac=0, bias=True, zero_init=False, init_me
     A = Dense(U) @ Dense(V)
     return CoLALayer(A, bias=bias)
 
+def get_activation_fn(activation):
+    """Helper to get activation function from string name"""
+    if activation == 'gelu':
+        return F.gelu
+    elif activation == 'relu':
+        return F.relu
+    elif activation == 'silu' or activation == 'swish':
+        return F.silu
+    elif activation == 'tanh':
+        return torch.tanh
+    else:
+        raise ValueError(f'Unknown activation: {activation}')
+
+def build_low_rank_actv(d_in, d_out, rank_frac=0, bias=True, zero_init=False, init_method='µP', activation='gelu', **_):
+    assert rank_frac >= 0, 'rank_frac must be non-negative'
+    if rank_frac == 0:
+        rank_frac = 1 / np.sqrt(min(d_in, d_out))
+    rank = ceil(rank_frac * min(d_in, d_out))
+
+    # Create matrix A (d_in x rank)
+    A = torch.randn(d_in, rank)
+    A.d_in, A.d_out = d_in, rank
+    A.in_dims, A.out_dims = (0,), (1,)
+    cola_init(A, init_method=init_method)
+
+    # Create matrix B (rank x d_out)
+    B = torch.randn(rank, d_out)
+    B.d_in, B.d_out = rank, d_out
+    B.in_dims, B.out_dims = (0,), (1,)
+    cola_init(B, zero_init, init_method=init_method)
+
+    # Get activation function
+    actv_fn = get_activation_fn(activation)
+
+    # Create LowRankActv operator
+    op = LowRankActv(A, B, actv_fn, shape=(d_in, d_out))
+    return CoLALayer(op, bias=bias)
+
 def build_tt(d_in, d_out, tt_cores, tt_rank, permute=False, bias=True, zero_init=False, init_method='µP', **_):
     ns, ms = factorize(d_in, tt_cores), factorize(d_out, tt_cores)
     print(f'TT shape: {ns} -> {ms}')
@@ -225,6 +263,42 @@ def build_btt(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False, zero
         cores.append(gamma0)
         cores.append(gamma1)
     A = FasterBTT(cores, shapes, normalize)
+    if permute:
+        P_in = Permutation(torch.randperm(d_in), dtype=A.dtype)
+        P_out = Permutation(torch.randperm(d_out), dtype=A.dtype)
+        A = P_in @ A @ P_out
+    return CoLALayer(A, bias=bias)
+
+def build_btt_actv(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False, zero_init=False, normalize=False,
+                   learn_gamma=True, init_method='µP', activation='relu', **_):
+    """Build BTT layer with activation between cores"""
+    assert tt_rank > 0, 'tt_rank must be positive'
+    ns, ms = tuple(factorize(d_out, tt_cores)), tuple(factorize(d_in, tt_cores))
+    rs = (1, tt_rank, 1)
+    shapes = (rs, ms, ns)
+    cores = []
+    print(f'BTT-Actv ({activation}) shape: {ms} -> {ns}')
+
+    for idx in range(tt_cores):
+        size = ns[:idx] + ms[idx + 1:] + (rs[idx] * ms[idx], rs[idx + 1] * ns[idx])
+        core = torch.randn(*size, dtype=torch.float32)
+        core.d_in = rs[idx] * ms[idx]
+        core.d_out = ns[idx] * rs[idx + 1]
+        core.in_dims = (-2,)
+        core.out_dims = (-1,)
+        cola_init(core, zero_init and idx == tt_cores - 1, init_method=init_method)
+        cores.append(core)
+
+    if normalize and learn_gamma:
+        gamma0 = nn.Parameter(torch.tensor(1.))
+        gamma1 = nn.Parameter(torch.tensor(1.))
+        cores.append(gamma0)
+        cores.append(gamma1)
+
+    # Get activation function
+    actv_fn = get_activation_fn(activation)
+
+    A = FasterBTTActv(cores, shapes, actv_fn, normalize)
     if permute:
         P_in = Permutation(torch.randperm(d_in), dtype=A.dtype)
         P_out = Permutation(torch.randperm(d_out), dtype=A.dtype)
@@ -283,11 +357,14 @@ def build_monarch(d_in, d_out, num_blocks=4, bias=True, zero_init=False, init_me
 
 build_fns = {
     'low_rank': build_low_rank,
+    'low_rank_actv': build_low_rank_actv,
     'kron': build_tt,
     'tt': build_tt,
     'btt_slow': build_btt_slow,
     'btt': lambda *args, **kwargs: build_btt(*args, **kwargs),
     'btt_norm': lambda *args, **kwargs: build_btt(*args, normalize=True, **kwargs),
+    'btt_actv': lambda *args, **kwargs: build_btt_actv(*args, **kwargs),
+    'btt_actv_norm': lambda *args, **kwargs: build_btt_actv(*args, normalize=True, **kwargs),
     'monarch': build_monarch,
     'dense': build_dense,
     'none': None,

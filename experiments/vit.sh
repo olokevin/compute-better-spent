@@ -72,6 +72,32 @@ python3 train_cifar.py \
 --scheduler=cosine
 done;
 
+### Low Rank with Activation ####
+depth=3
+width=64
+struct=low_rank_actv
+layers=intermediate
+for scale_factor in 1 2 4 8 16 32; do
+python3 train_cifar.py \
+--wandb_project=vit_${ds} \
+--dataset=${ds} \
+--model=ViT \
+--width=${width} \
+--depth=${depth} \
+--lr=${lr} \
+--batch_size=256 \
+--epochs=200 \
+--resolution=32 \
+--patch_size=8 \
+--optimizer=adamw \
+--scale_factor=${scale_factor} \
+--struct=${struct} \
+--rank_frac=0.1 \
+--activation=gelu \
+--layers=${layers} \
+--scheduler=cosine
+done;
+
 ### BTT ####
 depth=3
 width=64
@@ -96,6 +122,30 @@ python3 train_cifar.py \
 --scheduler=cosine
 done;
 
+### BTT with Activation ####
+depth=3
+width=64
+struct=btt_actv
+layers=all_but_last
+for scale_factor in 1 2 4 8 16 32 64; do
+python3 train_cifar.py \
+--wandb_project=vit_${ds} \
+--dataset=${ds} \
+--model=ViT \
+--width=${width} \
+--depth=${depth} \
+--lr=${lr} \
+--batch_size=256 \
+--epochs=200 \
+--resolution=32 \
+--patch_size=8 \
+--optimizer=adamw \
+--scale_factor=${scale_factor} \
+--struct=${struct} \
+--layers=${layers} \
+--activation=relu \
+--scheduler=cosine
+done;
 
 # ### Monarch ####
 depth=3

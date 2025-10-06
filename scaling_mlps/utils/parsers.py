@@ -58,6 +58,7 @@ def get_training_parser():
     parser.add_argument("--tt_rank", type=int, default=1)
     parser.add_argument("--tt_cores", type=int, default=2)
     parser.add_argument("--num_blocks", type=int, default=4)
+    parser.add_argument("--activation", type=str, default='relu', choices=['relu', 'gelu', 'silu', 'swish', 'tanh'], help="Activation function for actv layers")
     parser.add_argument("--aux_loss_weight", type=float, default=0.01)
     parser.add_argument("--spec_penalty_weight", type=float, default=0.)
 

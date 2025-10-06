@@ -166,6 +166,102 @@ class FasterBTT(LinearOperator):
     def __str__(self):
         return "BTT"
 
+class FasterBTTActv(LinearOperator):
+    """
+    BTT with activation between cores: v @ W0 @ activation() @ W1
+
+    Args:
+        Ms (array_like): Cores of the BTT (2 cores: W0, W1, optional gamma params)
+        shapes (tuple): Shapes (rs, ms, ns)
+        activation (callable): Activation function to apply after first core
+        normalize (bool): If True, normalize the cores
+    """
+    def __init__(self, Ms, shapes, activation, normalize=False):
+        self.Ms = Ms
+        self.activation = activation
+        self.normalize = normalize
+        dtype = self.Ms[0].dtype
+        self.rs, self.ms, self.ns = shapes
+        shape = (prod(self.ms), prod(self.ns))
+        d_in, d_out = shape
+        self.max_rms = (min(d_in, d_out) * d_out / (d_out * d_in * d_in))**0.5
+        super().__init__(dtype, shape)
+
+    def _rmatmat(self, v):  # x -> x @ A
+        W0, W1 = self.Ms[0], self.Ms[1]
+        batch_n = v.shape[0]
+
+        # Apply normalization if needed
+        if self.normalize:
+            rms_W0 = torch.sqrt(torch.mean(W0**2.) + 1e-8)
+            d_in, d_out = self.rs[0] * self.ms[0], self.rs[1] * self.ns[0]
+            max_rms0 = (min(d_in, d_out) * d_out / (d_out * d_in * d_in))**0.5
+            if len(self.Ms) > 2:
+                W0 = self.Ms[2] * W0 / max(1, rms_W0 / max_rms0)
+            else:
+                W0 = W0 / max(1, rms_W0 / max_rms0)
+
+            rms_W1 = torch.sqrt(torch.mean(W1**2.) + 1e-8)
+            d_in, d_out = self.rs[1] * self.ms[1], self.rs[2] * self.ns[1]
+            max_rms1 = (min(d_in, d_out) * d_out / (d_out * d_in * d_in))**0.5
+            if len(self.Ms) > 2:
+                W1 = self.Ms[3] * W1 / max(1, rms_W1 / max_rms1)
+            else:
+                W1 = W1 / max(1, rms_W1 / max_rms1)
+
+        # First core multiplication
+        y = v.reshape(batch_n, self.ms[1], self.ms[0], -1)
+        y = y.transpose(0, 1)
+        y = y.reshape(self.ms[1], batch_n, self.ms[0] * self.rs[0])
+        out1 = torch.bmm(y, W0)
+        out1 = out1.reshape(self.ms[1], batch_n, self.ns[0], self.rs[1])
+        out1 = out1.transpose(0, 2).contiguous()
+        out1 = out1.reshape(self.ns[0], batch_n, self.ms[1] * self.rs[1])
+
+        # Apply activation
+        out1 = self.activation(out1)
+
+        # Second core multiplication
+        out2 = torch.bmm(out1, W1)
+        out2 = out2.reshape(self.ns[0], batch_n, self.ns[1], self.rs[2])
+        out2 = out2.transpose(0, 1)
+        out2 = out2.reshape(batch_n, -1)
+        return out2
+
+    def __str__(self):
+        return "BTTActv"
+
+class LowRankActv(LinearOperator):
+    """
+    Low-rank operator with activation: v @ A @ activation(B)
+    where A is d_in x rank and B is rank x d_out
+
+    Args:
+        A (Tensor): First low-rank matrix (d_in x rank)
+        B (Tensor): Second low-rank matrix (rank x d_out)
+        activation (callable): Activation function to apply after A
+        shape (tuple): Shape of the full operator (d_in, d_out)
+    """
+    def __init__(self, A, B, activation, shape):
+        self.A = A
+        self.B = B
+        self.activation = activation
+        dtype = self.A.dtype
+        super().__init__(dtype, shape)
+
+    def _rmatmat(self, v):
+        # v: (batch, d_in)
+        # First multiply by A: (batch, d_in) @ (d_in, rank) -> (batch, rank)
+        out = v @ self.A
+        # Apply activation
+        out = self.activation(out)
+        # Multiply by B: (batch, rank) @ (rank, d_out) -> (batch, d_out)
+        out = out @ self.B
+        return out
+
+    def __str__(self):
+        return "LowRankActv"
+
 class Permutation(LinearOperator):
     def __init__(self, indicies, dtype):
         self.indicies = indicies

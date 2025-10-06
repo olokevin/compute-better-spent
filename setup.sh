@@ -6,11 +6,11 @@ pip install --upgrade pip
 pip uninstall torch -y
 pip uninstall torchvision -y
 pip install torch==1.12.0 torchvision==0.13.0 torchdistx --index-url https://download.pytorch.org/whl/cu116
-conda install -c pytorch -c conda-forge torchdistx cudatoolkit=11.6 --force
+# conda install -c pytorch -c conda-forge torchdistx cudatoolkit=11.6 --force
 cd ~; git clone https://github.com/wilson-labs/cola.git; cd -
 sed -i '/torch\.func/s/^/#/' ~/cola/cola/backends/torch_fns.py # comment out lines containing torch.func which is not available in torch 1.12
 pip install $HOME/cola/.[dev]
-pip install datasets tiktoken torchmetrics
+# pip install datasets tiktoken torchmetrics
 conda deactivate
 
 # GPT experiments
