@@ -1,0 +1,56 @@
+# ZO Configuration for CIFAR Training
+# This config enables zeroth-order (ZO) gradient estimation for CIFAR-10/100 classification
+
+name: ZO_Estim_MC
+
+# Perturbation parameters
+sigma: 0.01                      # Perturbation magnitude (smoothing parameter)
+n_sample: 20                     # Number of random samples per gradient estimate
+                                 # Higher = more accurate but slower (20-100 typical)
+
+# Gradient estimation method
+estimate_method: antithetic      # 'forward' or 'antithetic' (antithetic has lower variance)
+sample_method: bernoulli         # 'gaussian', 'bernoulli' (Rademacher), or 'uniform'
+
+# Optimization options
+signsgd: false                   # Use sign of gradient only (not recommended for CIFAR)
+quantized: false                 # Use quantized perturbations
+
+# Scaling options
+scale: null                      # null, 'sqrt_dim', or 'dim' (usually null is best)
+normalize_perturbation: false    # Normalize perturbation vectors to unit norm
+
+# What to perturb - CHOOSE ONE MODE:
+
+# Mode 1: Activation Perturbation (Recommended for CIFAR)
+# Perturbs layer outputs, works well with structured matrices
+actv_perturb_block_idx_list: all     # 'all' or list of layer indices, e.g., [0, 1, 2]
+param_perturb_block_idx_list: null   # Set to null to disable parameter perturbation
+
+# Mode 2: Parameter Perturbation (Alternative)
+# Uncomment to perturb weights instead of activations
+# actv_perturb_block_idx_list: null
+# param_perturb_block_idx_list: all
+# en_param_commit: false               # Whether to commit parameter changes (for special layers)
+
+# Objective function type
+obj_fn_type: CIFAR               # Must match the objective function in build_obj_fn()
+
+# Perturbation strategy
+en_layerwise_perturbation: false # false = perturb all layers at once (faster)
+                                 # true = perturb each layer separately (more accurate)
+en_partial_forward: false        # Enable partial forward computation (only with layerwise=true)
+
+# Advanced options (usually not needed for CIFAR)
+en_wp_np_mixture: false          # Mix weight and node perturbation
+en_pseudo_ZO: false              # Use pseudo-ZO with automatic differentiation
+# pzo_momentum: 0.99             # Momentum for pseudo-ZO
+# pzo_detach_idx: -1             # Where to detach computation graph
+
+# Notes:
+# 1. For BTT/structured matrices, activation perturbation (actv) is recommended
+# 2. Start with n_sample=20, increase if gradient estimates are noisy
+# 3. sigma=0.01 works well for most cases, tune if needed
+# 4. antithetic method is preferred (2x forward passes but lower variance)
+# 5. Each training step requires (n_sample * 2) forward passes with antithetic method
+#    or n_sample forward passes with forward method

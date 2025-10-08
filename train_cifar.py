@@ -17,8 +17,18 @@ from scaling_mlps.utils.optimizer import get_scheduler
 from scaling_mlps.utils.parsers import get_training_parser
 from einops import rearrange
 
+import yaml
+from easydict import EasyDict
+import torch.nn.functional as F
+from ZO_Estim.ZO_Estim_entry import build_ZO_Estim
+from ZO_Estim.ZO_Estim_entry import build_obj_fn
+from ZO_Estim.ZO_utils import default_create_bwd_pre_hook_ZO_grad
 
-def train(model, opt, scheduler, loss_fn, epoch, train_loader, args):
+DEBUG=False
+# DEBUG=True
+
+
+def train(model, opt, scheduler, loss_fn, epoch, train_loader, ZO_Estim, args):
     start = time.time()
     model.train()
 
@@ -27,43 +37,115 @@ def train(model, opt, scheduler, loss_fn, epoch, train_loader, args):
     total_aux_loss = AverageMeter()
 
     for step, (ims, targs) in enumerate(train_loader):
-        preds = model(ims)
-
-        if args.mixup > 0:
-            targs_perm = targs[:, 1].long()
-            weight = targs[0, 2].squeeze()
-            targs = targs[:, 0].long()
-            if weight != -1:
-                loss = loss_fn(preds, targs) * weight + loss_fn(preds, targs_perm) * (1 - weight)
+        if ZO_Estim is not None:
+            ### ZO grad estimation
+            obj_fn = build_obj_fn(ZO_Estim.obj_fn_type, model=model, ims=ims, targs=targs, loss_fn=loss_fn, args=args)
+            ZO_Estim.update_obj_fn(obj_fn)
+            
+            ### set dropout to eval mode
+            model.eval()
+            outputs, loss = ZO_Estim.estimate_grad()
+            
+            ### real NP (create_fwd_hook_assign_grad)
+              # No need to explicitly generate ZO_grad_output first,
+              # in estimate_grad, we will run a forward pass to directly get ZO grad of each parameter
+                
+            ### real NP (zo_np_create_forward_hook)
+              # explicitly genenrate ZO_grad_output first
+              # use customized hook to get grad of each parameter
+            # if ZO_Estim.splited_layer_list is not None:
+            #     fwd_hook_list = []
+            #     for splited_layer in ZO_Estim.splited_layer_list:
+            #         if splited_layer.mode == 'actv':
+            #             zo_np_create_forward_hook = getattr(splited_layer.layer, 'zo_np_create_forward_hook', None)
+            #             if zo_np_create_forward_hook is None:
+            #                 print(f'skip {splited_layer.name}')
+            #             else:
+            #                 fwd_hook_list.append(splited_layer.layer.register_forward_hook(zo_np_create_forward_hook(splited_layer.layer.ZO_grad_output)))
+                
+            #     with torch.no_grad():
+            #         outputs, loss = obj_fn()
+                
+            #     for fwd_hook in fwd_hook_list:
+            #         fwd_hook.remove()
+            
+            ### pseudo NP (backward hook)
+              # explicitly genenrate ZO_grad_output first
+              # attain BP graph to get grad of each parameter
+            if ZO_Estim.splited_layer_list is not None:
+                model.train()
+                bwd_pre_hook_list = []
+                for splited_layer in ZO_Estim.splited_layer_list:
+                    if splited_layer.mode == 'actv':
+                        create_bwd_pre_hook_ZO_grad = getattr(splited_layer.layer, 'create_bwd_pre_hook_ZO_grad', default_create_bwd_pre_hook_ZO_grad)
+                        bwd_pre_hook_list.append(splited_layer.layer.register_full_backward_pre_hook(create_bwd_pre_hook_ZO_grad(splited_layer.layer.ZO_grad_output, DEBUG)))
+                outputs, loss = obj_fn()
+                loss.backward()
+                
+                for bwd_pre_hook in bwd_pre_hook_list:
+                    bwd_pre_hook.remove()
+            
+            ### For metric loading
+            preds = outputs.logits
+            if args.mixup > 0:
+                targs_perm = targs[:, 1].long()
+                weight = targs[0, 2].squeeze()
+                targs = targs[:, 0].long()
+                if weight != -1:
+                    pass
+                else:
+                    targs_perm = None
             else:
+                if args.ar_modeling:
+                    targs = rearrange(ims, 'b c h w -> (b h w c)')
+                    preds = preds[:, :-1].reshape(-1, preds.shape[-1])  # nothing to predict after the last pixel
                 loss = loss_fn(preds, targs)
                 targs_perm = None
+                
+            # load balancing loss
+            aux_losses = []
+            for name, module in model.named_modules():
+                if 'moe_gate' in name:
+                    aux_losses.append(module.load_balancing_loss)
+            aux_loss = sum(aux_losses) / len(aux_losses) if aux_losses else 0
+
         else:
-            if args.ar_modeling:
-                targs = rearrange(ims, 'b c h w -> (b h w c)')
-                preds = preds[:, :-1].reshape(-1, preds.shape[-1])  # nothing to predict after the last pixel
-            loss = loss_fn(preds, targs)
-            targs_perm = None
+            preds = model(ims)
+            if args.mixup > 0:
+                targs_perm = targs[:, 1].long()
+                weight = targs[0, 2].squeeze()
+                targs = targs[:, 0].long()
+                if weight != -1:
+                    loss = loss_fn(preds, targs) * weight + loss_fn(preds, targs_perm) * (1 - weight)
+                else:
+                    loss = loss_fn(preds, targs)
+                    targs_perm = None
+            else:
+                if args.ar_modeling:
+                    targs = rearrange(ims, 'b c h w -> (b h w c)')
+                    preds = preds[:, :-1].reshape(-1, preds.shape[-1])  # nothing to predict after the last pixel
+                loss = loss_fn(preds, targs)
+                targs_perm = None
 
-        # load balancing loss
-        aux_losses = []
-        spec_penalties = []
-        for name, module in model.named_modules():
-            if 'moe_gate' in name:
-                aux_losses.append(module.load_balancing_loss)
-            if hasattr(module, 'natural_norm'):
-                spec_penalties.append(module.natural_norm**2)
-        aux_loss = sum(aux_losses) / len(aux_losses) if aux_losses else 0
-        spec_penalty = sum(spec_penalties) / len(spec_penalties) if spec_penalties else 0
-        loss += aux_loss * args.aux_loss_weight
-        loss += spec_penalty * args.spec_penalty_weight
+            # load balancing loss
+            aux_losses = []
+            spec_penalties = []
+            for name, module in model.named_modules():
+                if 'moe_gate' in name:
+                    aux_losses.append(module.load_balancing_loss)
+                if hasattr(module, 'natural_norm'):
+                    spec_penalties.append(module.natural_norm**2)
+            aux_loss = sum(aux_losses) / len(aux_losses) if aux_losses else 0
+            spec_penalty = sum(spec_penalties) / len(spec_penalties) if spec_penalties else 0
+            loss += aux_loss * args.aux_loss_weight
+            loss += spec_penalty * args.spec_penalty_weight
 
+            loss = loss / args.accum_steps
+            loss.backward()
+        
         acc, top5 = topk_acc(preds, targs, targs_perm, k=5, avg=True)
         total_acc.update(acc, ims.shape[0])
         total_top5.update(top5, ims.shape[0])
-
-        loss = loss / args.accum_steps
-        loss.backward()
 
         if (step + 1) % args.accum_steps == 0 or (step + 1) == len(train_loader):
             if args.clip > 0:
@@ -124,7 +206,7 @@ def main(args):
     set_seed(args.seed)
     # Use mixed precision matrix multiplication
     torch.backends.cuda.matmul.allow_tf32 = True
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     input_shape = (1, 3, args.crop_resolution, args.crop_resolution)
     model_builder = getattr(nn, args.model)
@@ -195,6 +277,19 @@ def main(args):
 
     scheduler = get_scheduler(opt, args.scheduler, **args.__dict__)
     loss_fn = CrossEntropyLoss(label_smoothing=args.smooth)
+    
+    # ================== ZO_Estim ======================
+    ZO_Estim = None
+    if args.ZO_config_path is not None:
+        # file_path = 'ZO_Estim/ZO_config.yaml'
+        file_path = args.ZO_config_path
+        
+        with open(file_path, 'r') as f:
+            yaml_dict = yaml.safe_load(f)
+        ZO_config = EasyDict(yaml_dict)
+        
+        ZO_Estim = build_ZO_Estim(ZO_config, model=model, )
+    # ================== ZO_Estim ======================
 
     # Create unique identifier
     run_name = config_to_name(args)
@@ -246,8 +341,7 @@ def main(args):
         if ep == 0:  # skip first epoch
             train_acc, train_top5, train_loss, aux_loss, train_time = 0, 0, 0, 0, 0
         else:
-            train_acc, train_top5, train_loss, aux_loss, train_time = train(model, opt, scheduler, loss_fn, ep, train_loader,
-                                                                            args)
+            train_acc, train_top5, train_loss, aux_loss, train_time = train(model, opt, scheduler, loss_fn, ep, train_loader, ZO_Estim, args)
         if len(recent_train_accs) == 10:
             recent_train_accs.pop(0)
         recent_train_accs.append(train_acc)

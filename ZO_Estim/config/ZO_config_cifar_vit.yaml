@@ -1,0 +1,121 @@
+# ZO Configuration for CIFAR-10/100 with Vision Transformer (ViT)
+# Uses rule-based layer selection with regex patterns
+
+name: ZO_Estim_MC
+
+# ===== Perturbation Parameters =====
+sigma: 0.01
+n_sample: 20
+estimate_method: antithetic
+sample_method: bernoulli
+
+# ===== Optimization Options =====
+signsgd: false
+quantized: false
+scale: null
+normalize_perturbation: false
+en_param_commit: false
+
+# ===== Objective Function =====
+obj_fn_type: CIFAR
+
+# ===== Perturbation Strategy =====
+en_layerwise_perturbation: false
+en_partial_forward: false
+en_wp_np_mixture: false
+en_pseudo_ZO: false
+
+# ===== RULE-BASED LAYER SELECTION FOR ViT =====
+
+# --- Mode 1: Activation Perturbation (RECOMMENDED) ---
+actv_perturb_rules:
+  # Attention Q, K, V projections (when replaced with CoLA)
+  attention_qkv:
+    name_pattern: 'transformer\.\d+\.attn\.to_[qkv]'
+    type: [!CoLALayer]
+
+  # Attention output projection
+  attention_out:
+    name_pattern: 'transformer\.\d+\.attn\.to_out\.0'
+    type: [!CoLALayer]
+
+  # FeedForward network layers
+  ffn_layers:
+    name_pattern: 'transformer\.\d+\.ff\.net\.[13]'  # Matches net.1 and net.3 (the Linear layers)
+    type: [!CoLALayer]
+
+  # MLP head (if using --layers=all)
+  # mlp_head:
+  #   name_pattern: '^mlp_head\.\d+'
+  #   type: [!CoLALayer]
+
+  # Note: Exclude final classification layer by not matching it
+
+# --- Mode 2: Parameter Perturbation (Alternative) ---
+# param_perturb_rules:
+#   attention_params:
+#     name_pattern: 'transformer\.\d+\.attn\.to_[qkv]\.(weight|bias)'
+#
+#   ffn_params:
+#     name_pattern: 'transformer\.\d+\.ff\.net\.[13]\.(weight|bias)'
+
+# ===== ViT Architecture Reference =====
+# When training CIFAR with ViT (--model=ViT), the model structure is:
+#
+# Transformer(
+#   to_patch_embedding: Sequential(...)
+#   dropout: Dropout(...)
+#   transformer: ModuleList(
+#     (0): ModuleList(
+#       (0): Attention(
+#         norm: LayerNorm(...)
+#         to_q: Linear(dim, inner_dim, bias=False)   ← Can be CoLALayer
+#         to_k: Linear(dim, inner_dim, bias=False)   ← Can be CoLALayer
+#         to_v: Linear(dim, inner_dim, bias=False)   ← Can be CoLALayer
+#         to_out: Sequential(
+#           (0): Linear(inner_dim, dim)              ← Can be CoLALayer
+#           (1): Dropout(...)
+#         )
+#       )
+#       (1): FeedForward(
+#         net: Sequential(
+#           (0): LayerNorm(...)
+#           (1): Linear(dim, hidden_dim)             ← Can be CoLALayer
+#           (2): GELU()
+#           (3): Linear(hidden_dim, dim)             ← Can be CoLALayer
+#         )
+#       )
+#     )
+#     (1): ModuleList(...)
+#     ...
+#   )
+#   mlp_head: Sequential(
+#     (0): LayerNorm(...)
+#     (1): Linear(dim, num_classes)                  ← Usually kept as nn.Linear
+#   )
+# )
+#
+# Regex Pattern Breakdown:
+# - 'transformer\.\d+\.attn\.to_q' matches transformer.0.attn.to_q, transformer.1.attn.to_q, etc.
+# - 'transformer\.\d+\.attn\.to_[qkv]' matches to_q, to_k, to_v
+# - 'transformer\.\d+\.ff\.net\.[13]' matches net.1 (first Linear) and net.3 (second Linear)
+
+# ===== Usage Examples =====
+#
+# 1. Train ViT with BTT and ZO:
+#    python train_cifar.py --dataset=cifar10 --model=ViT --vit_depth=6 \
+#      --vit_patch_size=4 --struct=btt --layers=all_but_last \
+#      --ZO_config_path=ZO_Estim/ZO_config_cifar_vit.yaml
+#
+# 2. Train ViT with Monarch and ZO:
+#    python train_cifar.py --dataset=cifar10 --model=ViT --vit_depth=6 \
+#      --struct=monarch --layers=ffn \
+#      --ZO_config_path=ZO_Estim/ZO_config_cifar_vit.yaml
+#
+# Note: When using --layers=ffn, only FeedForward layers are replaced
+# When using --layers=all_but_last, attention and FFN are replaced (except final head)
+
+# ===== Tuning Tips =====
+# - For deeper ViTs (depth > 12), consider increasing n_sample to 30-50
+# - If training is unstable, reduce sigma to 0.005
+# - For faster experimentation, reduce n_sample to 10 (noisier but faster)

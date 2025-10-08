@@ -89,6 +89,9 @@ def get_training_parser():
     parser.add_argument("--wandb_project", default="struct_mlp", type=str, help="Wandb project name")
     parser.add_argument("--wandb_entity", default=None, type=str, help="Wandb entity name")
 
+    # Zeroth-Order Training
+    parser.add_argument("--ZO_config_path", default=None, type=str, help="Path to ZO configuration YAML file. If provided, enables zeroth-order gradient estimation")
+
     return parser
 
 

@@ -1,3 +1,3 @@
 {
-  "globalPrompt": "When implementing methods, do not generate markdown documentation files (.md) for individual methods. Only create .md files when explicitly requested. Delete the test files after it passed"
+  "globalPrompt": "Save markdown documentation files (.md) under /docs. Delete the test files after it passed"
 }

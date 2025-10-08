@@ -1,3 +1,4 @@
+export CUDA_VISIBLE_DEVICES=2
 ds=cifar10 # choose from {cifar10, cifar100}
 lr=3e-3
 
@@ -111,6 +112,9 @@ width=64
 struct=btt
 layers=all_but_last
 for scale_factor in 2 4 8 16 32 64 128 256; do
+tt_rank=$(echo "sqrt(${width}*${scale_factor})/2" | bc -l)
+tt_rank=$(printf "%.0f" "$tt_rank")
+# tt_rank=1
 python3 train_cifar.py \
 --wandb_project=mlp_${ds} \
 --dataset=${ds} \
@@ -126,7 +130,8 @@ python3 train_cifar.py \
 --input_lr_mult=0.1 \
 --struct=${struct} \
 --layers=${layers} \
---scheduler=cosine
+--scheduler=cosine \
+--tt_rank=${tt_rank}
 done;
 }
 
@@ -137,6 +142,9 @@ width=64
 struct=btt_actv
 layers=all_but_last
 for scale_factor in 2 4 8 16 32 64 128 256; do
+tt_rank=$(echo "sqrt(${width}*${scale_factor})/2" | bc -l)
+tt_rank=$(printf "%.0f" "$tt_rank")
+# tt_rank=1
 python3 train_cifar.py \
 --wandb_project=mlp_${ds} \
 --dataset=${ds} \
@@ -153,7 +161,8 @@ python3 train_cifar.py \
 --struct=${struct} \
 --layers=${layers} \
 --activation=relu \
---scheduler=cosine
+--scheduler=cosine \
+--tt_rank=${tt_rank}
 done;
 }
 
@@ -215,7 +224,9 @@ done;
 # run_monarch
 # run_tt
 
-# run_low_rank
-run_low_rank_actv
+run_low_rank
+# run_low_rank_actv
 # run_btt
 # run_btt_actv
+
+# nohup bash experiments/mlp.sh >/dev/null 2>&1 &
