@@ -1,0 +1,77 @@
+# ZO Configuration for CIFAR-10/100 with MLP Model
+# Clean, rule-based layer selection
+
+name: ZO_Estim_MC
+obj_fn_type: CIFAR
+
+# ===== Perturbation Parameters =====
+sigma: 0.01                      # Perturbation magnitude
+n_sample: 1                      # Number of random samples per gradient estimate
+estimate_method: antithetic      # 'forward' or 'antithetic'
+sample_method: bernoulli         # 'gaussian', 'bernoulli', or 'uniform'
+
+# ===== Optimization Options =====
+signsgd: false                   # Use sign of gradient only
+quantized: false                 # Use quantized perturbations
+normalize_perturbation: false    # Normalize perturbation to unit norm
+scale: null                      # Gradient scaling: null, 'sqrt_dim', or 'dim'
+
+# ===== Strategy Flags =====
+en_layerwise_perturbation: false  # Perturb one layer at a time
+en_partial_forward: false         # Use partial forward (requires model support)
+en_wp_np_mixture: false          # Mix weight and node perturbation
+en_pseudo_ZO: false              # Exclude classifier layers
+en_param_commit: false           # Commit param changes during perturbation
+
+# ===== Rule-Based Layer Selection =====
+# Choose ONE mode: param_perturb_rules (WP) OR actv_perturb_rules (NP)
+
+# --- Node Perturbation (Recommended for structured matrices) ---
+actv_perturb_rules:
+  # Match all hidden layer linears: hidden_layers.0.linear1, hidden_layers.1.linear2, etc.
+  hidden_layers:
+    name_pattern: '^hidden_layers\.\d+\.(linear1|linear2)$'
+
+  # Match input layer exactly
+  input_layer:
+    name_pattern: '^input_layer$'
+
+  # Note: output_layer is excluded by not matching it
+
+# --- Weight Perturbation (Alternative) ---
+# Uncomment to use weight perturbation instead:
+# param_perturb_rules:
+#   # All parameters in hidden layers
+#   hidden_params:
+#     name_pattern: 'hidden_layers\.\d+\.(linear1|linear2)\.(weight|bias)'
+#
+#   # Input layer parameters
+#   input_params:
+#     name_pattern: 'input_layer\.(weight|bias)'
+
+# ===== Model Architecture Reference =====
+# MLP(
+#   input_layer: Linear(3072, width) or CoLALayer
+#   hidden_layers: ModuleList(
+#     (0): MLPBlock(
+#       linear1: Linear(width, width*4) or CoLALayer
+#       linear2: Linear(width*4, width) or CoLALayer
+#       ln: LayerNorm(width)
+#       gelu: GELU()
+#     )
+#     ...
+#   )
+#   output_layer: Linear(width, 10)
+# )
+
+# ===== Usage Examples =====
+#
+# 1. Train MLP with BTT and ZO (Node Perturbation):
+#    python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \
+#      --struct=btt --layers=all_but_last \
+#      --ZO_config_path=ZO_grad_estimator/config_examples/zo_cifar_mlp.yaml
+#
+# 2. Train MLP with dense and ZO (Weight Perturbation):
+#    Edit config to uncomment param_perturb_rules, then:
+#    python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \
+#      --struct=dense --ZO_config_path=ZO_grad_estimator/config_examples/zo_cifar_mlp.yaml

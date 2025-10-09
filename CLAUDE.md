@@ -362,9 +362,11 @@ y = layer(x)
 
 
 ## Zeroth-order (ZO) gradient estimator
-implement under directory ZO_grad_estimator
 
-ZO use repeat forward (loss computation) to estimate the gradients: one "clean" forward, and one (or multiple) "perturbed" forwards. It replaces the forward and backward, directly assign the gradient estimation to param.grad, and later we can still call the optimizer.step() to update the parameters
+**New clean implementation**: `ZO_grad_estimator/` (recommended)
+**Legacy implementation**: `ZO_Estim/` (kept for backward compatibility)
+
+ZO uses repeated forward passes (loss computation) to estimate gradients: one "clean" forward, and one (or multiple) "perturbed" forwards. It replaces forward and backward, directly assigns the gradient estimation to param.grad, and then we can call optimizer.step() to update the parameters.
 
 * config and init 
   * use a separate .yaml file to save the configs for 
@@ -388,5 +390,42 @@ ZO use repeat forward (loss computation) to estimate the gradients: one "clean" 
       * pseudo NP: explicilty get the ZO gradient estimation of the output, still build and call BP, but use additional backward hook to replace the true gradients of the output with the ZO estimation
       * true NP: do it in a memory-efficient way: do not explicilty save the ZO gradient estimation of the output, regenerate based on saved random seeds and scaling_factors. do not create BP graph, but use customized forward hook, register before "dummy forward", and compute the gradients of parameters in the dummy forward when the input activation is again available
 
-* general method
-  * the gradient estimator should fit both 2-d activation (batch, dim) an
+* variants
+  * en_layerwise_perturbation: if True, only add perturbation to one params
+  * en_partial_forward: skip this as for now
+  * en_wp_np_mixture: skip this as for now
+  * en_pseudo_ZO: skip this as for now
+
+* memory-efficient implementation
+  * in addition to the above memory-efficient practices, always wrap the code in no_grad(). clean up the intermediate results to free up gpu memory usage
+
+* make it a general method
+  * the gradient estimator should fit both 2-d activation (batch, dim) and 3-d activation (batch, seq_len, dim) for LLMs
+
+* for testing:
+  * prepare the unit test cases to cover the above variants
+  * sample script is as follows
+  ```
+  ds=cifar10 # choose from {cifar10, cifar100}
+  lr=3e-3
+  depth=3
+  width=64
+  struct=dense
+  for scale_factor in 0.5 1 2 4 8 16 32 64; do
+  python3 train_cifar.py \
+  --wandb_project=mlp_${ds} \
+  --dataset=${ds} \
+  --model=MLP \
+  --width=${width} \
+  --depth=${depth} \
+  --lr=${lr} \
+  --batch_size=1024 \
+  --epochs=500 \
+  --resolution=32 \
+  --optimizer=adamw \
+  --scale_factor=${scale_factor} \
+  --input_lr_mult=0.1 \
+  --struct=${struct} \
+  --scheduler=cosine \
+  --ZO_config_path=ZO_Estim/config/ZO_config_cifar_mlp.yaml
+  ```

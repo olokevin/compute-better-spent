@@ -1,0 +1,39 @@
+# ZO Configuration for CIFAR-10/100 with MLP Model - Weight Perturbation
+# For testing DEBUG mode with weight perturbation
+
+name: ZO_Estim_MC
+obj_fn_type: CIFAR
+
+# ===== Perturbation Parameters =====
+sigma: 0.01                      # Perturbation magnitude
+n_sample: 1                      # Number of random samples per gradient estimate
+estimate_method: antithetic      # 'forward' or 'antithetic'
+sample_method: bernoulli         # 'gaussian', 'bernoulli', or 'uniform'
+
+# ===== Optimization Options =====
+signsgd: false                   # Use sign of gradient only
+quantized: false                 # Use quantized perturbations
+normalize_perturbation: false    # Normalize perturbation to unit norm
+scale: null                      # Gradient scaling: null, 'sqrt_dim', or 'dim'
+
+# ===== Strategy Flags =====
+en_layerwise_perturbation: false  # Perturb one layer at a time
+en_partial_forward: false         # Use partial forward (requires model support)
+en_wp_np_mixture: false          # Mix weight and node perturbation
+en_pseudo_ZO: false              # Exclude classifier layers
+en_param_commit: false           # Commit param changes during perturbation
+
+# ===== Rule-Based Parameter Selection (Weight Perturbation) =====
+param_perturb_rules:
+  # All parameters in hidden layers
+  hidden_params:
+    name_pattern: 'hidden_layers\.\d+\.(linear1|linear2)\.(weight|bias)'
+
+  # Input layer parameters
+  input_params:
+    name_pattern: 'input_layer\.(weight|bias)'
+
+# ===== Usage =====
+# python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \
+#   --struct=btt --layers=all_but_last \
+#   --ZO_config_path=ZO_grad_estimator/config/zo_cifar_mlp_wp.yaml

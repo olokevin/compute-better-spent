@@ -20,12 +20,23 @@ from einops import rearrange
 import yaml
 from easydict import EasyDict
 import torch.nn.functional as F
-from ZO_Estim.ZO_Estim_entry import build_ZO_Estim
-from ZO_Estim.ZO_Estim_entry import build_obj_fn
-from ZO_Estim.ZO_utils import default_create_bwd_pre_hook_ZO_grad
 
-DEBUG=False
-# DEBUG=True
+# ===== ZO Gradient Estimator (New Implementation) =====
+# Using clean ZO_grad_estimator with backward-compatible names
+# Old ZO_Estim still works, but new implementation is recommended
+from ZO_grad_estimator import ZOEstimator, ZOConfig, build_objective_function
+from ZO_grad_estimator.utils import create_bwd_pre_hook_replace_grad
+
+# Backward compatibility aliases for minimal code changes
+build_ZO_Estim = lambda config, model: ZOEstimator(config, model)
+build_obj_fn = build_objective_function
+default_create_bwd_pre_hook_ZO_grad = create_bwd_pre_hook_replace_grad
+
+# DEBUG=False  # Set to True to compare ZO gradients with true BP gradients
+DEBUG=True  # When enabled, prints cosine similarity between ZO and BP gradients for all parameters
+
+OUT_GRAD_DEBUG=False  # Set to True to compare ZO_grad_output with true output gradients (node perturbation only)
+# OUT_GRAD_DEBUG=True  # When enabled, prints cosine similarity between ZO and BP output gradients for each layer
 
 
 def train(model, opt, scheduler, loss_fn, epoch, train_loader, ZO_Estim, args):
@@ -39,52 +50,177 @@ def train(model, opt, scheduler, loss_fn, epoch, train_loader, ZO_Estim, args):
     for step, (ims, targs) in enumerate(train_loader):
         if ZO_Estim is not None:
             ### ZO grad estimation
-            obj_fn = build_obj_fn(ZO_Estim.obj_fn_type, model=model, ims=ims, targs=targs, loss_fn=loss_fn, args=args)
-            ZO_Estim.update_obj_fn(obj_fn)
-            
-            ### set dropout to eval mode
-            model.eval()
-            outputs, loss = ZO_Estim.estimate_grad()
-            
-            ### real NP (create_fwd_hook_assign_grad)
-              # No need to explicitly generate ZO_grad_output first,
-              # in estimate_grad, we will run a forward pass to directly get ZO grad of each parameter
-                
-            ### real NP (zo_np_create_forward_hook)
-              # explicitly genenrate ZO_grad_output first
-              # use customized hook to get grad of each parameter
-            # if ZO_Estim.splited_layer_list is not None:
-            #     fwd_hook_list = []
-            #     for splited_layer in ZO_Estim.splited_layer_list:
-            #         if splited_layer.mode == 'actv':
-            #             zo_np_create_forward_hook = getattr(splited_layer.layer, 'zo_np_create_forward_hook', None)
-            #             if zo_np_create_forward_hook is None:
-            #                 print(f'skip {splited_layer.name}')
-            #             else:
-            #                 fwd_hook_list.append(splited_layer.layer.register_forward_hook(zo_np_create_forward_hook(splited_layer.layer.ZO_grad_output)))
-                
-            #     with torch.no_grad():
-            #         outputs, loss = obj_fn()
-                
-            #     for fwd_hook in fwd_hook_list:
-            #         fwd_hook.remove()
-            
-            ### pseudo NP (backward hook)
-              # explicitly genenrate ZO_grad_output first
-              # attain BP graph to get grad of each parameter
-            if ZO_Estim.splited_layer_list is not None:
+            obj_fn = build_obj_fn(ZO_Estim.config.obj_fn_type, model=model, ims=ims, targs=targs, loss_fn=loss_fn, args=args)
+            ZO_Estim.update_objective(obj_fn)
+
+            ### Weight Perturbation (WP)
+            if ZO_Estim.perturb_params:
+                # Set model to eval mode (disable dropout for ZO)
+                model.eval()
+                # Estimate gradients (assigns to param.grad)
+                outputs, loss = ZO_Estim.estimate_grad()
+
+                # DEBUG: Compare ZO gradients with true BP gradients
+                if DEBUG:
+                    # Save ZO gradients
+                    zo_grads = {}
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            zo_grads[name] = param.grad.clone()
+
+                    # Compute true gradients via backpropagation
+                    model.train()
+                    model.zero_grad()
+                    outputs_bp, loss_bp = obj_fn()
+                    loss_bp.backward()
+
+                    # Compare ZO vs BP gradients
+                    print('\n=== DEBUG: ZO vs BP Gradient Comparison (Weight Perturbation) ===')
+                    for name, param in model.named_parameters():
+                        if param.requires_grad and name in zo_grads:
+                            zo_grad = zo_grads[name]
+                            bp_grad = param.grad
+                            if bp_grad is not None:
+                                cos_sim = F.cosine_similarity(
+                                    zo_grad.reshape(-1),
+                                    bp_grad.reshape(-1),
+                                    dim=0
+                                )
+                                zo_norm = torch.linalg.norm(zo_grad.reshape(-1))
+                                bp_norm = torch.linalg.norm(bp_grad.reshape(-1))
+                                print(f'{name:60s} | cos_sim={cos_sim:.4f} | '
+                                      f'ZO_norm={zo_norm:.4e} | BP_norm={bp_norm:.4e}')
+
+                    # Restore ZO gradients
+                    for name, param in model.named_parameters():
+                        if name in zo_grads:
+                            param.grad = zo_grads[name]
+
+            ### Node Perturbation (NP)
+            elif ZO_Estim.perturb_layers:
+                # Set model to eval mode
+                model.eval()
+                # Estimate ZO_grad_output
+                ZO_Estim.estimate_grad()
+
+                # OUT_GRAD_DEBUG: Compare ZO_grad_output with true output gradients
+                if OUT_GRAD_DEBUG:
+                    # Save ZO_grad_output for each layer
+                    zo_grad_outputs = {}
+                    for perturb_layer in ZO_Estim.perturb_layers:
+                        if perturb_layer.mode == 'actv' and hasattr(perturb_layer.layer, 'ZO_grad_output'):
+                            zo_grad_outputs[perturb_layer.name] = perturb_layer.layer.ZO_grad_output.clone()
+
+                    # Compute true output gradients via BP
+                    # Register hooks to capture true output gradients
+                    true_grad_outputs = {}
+
+                    def make_grad_hook(layer_name):
+                        def hook(module, grad_input, grad_output):
+                            # grad_output[0] is the gradient w.r.t. the output
+                            if grad_output[0] is not None:
+                                true_grad_outputs[layer_name] = grad_output[0].detach().clone()
+                        return hook
+
+                    grad_hooks = []
+                    for perturb_layer in ZO_Estim.perturb_layers:
+                        if perturb_layer.mode == 'actv':
+                            hook = perturb_layer.layer.register_full_backward_hook(
+                                make_grad_hook(perturb_layer.name)
+                            )
+                            grad_hooks.append(hook)
+
+                    # Run BP to get true output gradients
+                    model.train()
+                    model.zero_grad()
+                    outputs_bp, loss_bp = obj_fn()
+                    loss_bp.backward()
+
+                    # Remove gradient capture hooks
+                    for hook in grad_hooks:
+                        hook.remove()
+
+                    # Compare ZO_grad_output vs true output gradients
+                    print('\n=== OUT_GRAD_DEBUG: ZO vs BP Output Gradient Comparison ===')
+                    for layer_name in zo_grad_outputs.keys():
+                        if layer_name in true_grad_outputs:
+                            zo_grad = zo_grad_outputs[layer_name]
+                            bp_grad = true_grad_outputs[layer_name]
+
+                            cos_sim = F.cosine_similarity(
+                                zo_grad.reshape(-1),
+                                bp_grad.reshape(-1),
+                                dim=0
+                            )
+                            zo_norm = torch.linalg.norm(zo_grad.reshape(-1))
+                            bp_norm = torch.linalg.norm(bp_grad.reshape(-1))
+
+                            print(f'{layer_name:60s} | cos_sim={cos_sim:.4f} | '
+                                  f'ZO_norm={zo_norm:.4e} | BP_norm={bp_norm:.4e}')
+
+                # Pseudo-NP: Use backward hooks to get param gradients
                 model.train()
                 bwd_pre_hook_list = []
-                for splited_layer in ZO_Estim.splited_layer_list:
-                    if splited_layer.mode == 'actv':
-                        create_bwd_pre_hook_ZO_grad = getattr(splited_layer.layer, 'create_bwd_pre_hook_ZO_grad', default_create_bwd_pre_hook_ZO_grad)
-                        bwd_pre_hook_list.append(splited_layer.layer.register_full_backward_pre_hook(create_bwd_pre_hook_ZO_grad(splited_layer.layer.ZO_grad_output, DEBUG)))
+                for perturb_layer in ZO_Estim.perturb_layers:
+                    if perturb_layer.mode == 'actv':
+                        create_bwd_pre_hook_ZO_grad = getattr(
+                            perturb_layer.layer,
+                            'create_bwd_pre_hook_ZO_grad',
+                            default_create_bwd_pre_hook_ZO_grad
+                        )
+                        bwd_pre_hook_list.append(
+                            perturb_layer.layer.register_full_backward_pre_hook(
+                                create_bwd_pre_hook_ZO_grad(perturb_layer.layer.ZO_grad_output, DEBUG)
+                            )
+                        )
+
+                # Forward and backward
                 outputs, loss = obj_fn()
                 loss.backward()
-                
+
+                # Remove hooks
                 for bwd_pre_hook in bwd_pre_hook_list:
                     bwd_pre_hook.remove()
-            
+
+                # DEBUG: Compare ZO gradients with true BP gradients
+                if DEBUG:
+                    # Save ZO gradients
+                    zo_grads = {}
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            zo_grads[name] = param.grad.clone()
+
+                    # Compute true gradients via backpropagation (without hooks)
+                    model.zero_grad()
+                    outputs_bp, loss_bp = obj_fn()
+                    loss_bp.backward()
+
+                    # Compare ZO vs BP gradients
+                    print('\n=== DEBUG: ZO vs BP Gradient Comparison (Node Perturbation) ===')
+                    for name, param in model.named_parameters():
+                        if param.requires_grad and name in zo_grads:
+                            zo_grad = zo_grads[name]
+                            bp_grad = param.grad
+                            if bp_grad is not None:
+                                cos_sim = F.cosine_similarity(
+                                    zo_grad.reshape(-1),
+                                    bp_grad.reshape(-1),
+                                    dim=0
+                                )
+                                zo_norm = torch.linalg.norm(zo_grad.reshape(-1))
+                                bp_norm = torch.linalg.norm(bp_grad.reshape(-1))
+                                print(f'{name:60s} | cos_sim={cos_sim:.4f} | '
+                                      f'ZO_norm={zo_norm:.4e} | BP_norm={bp_norm:.4e}')
+
+                    # Restore ZO gradients
+                    for name, param in model.named_parameters():
+                        if name in zo_grads:
+                            param.grad = zo_grads[name]
+
+            # Update parameters (ZO doesn't use gradient accumulation)
+            opt.step()
+            opt.zero_grad()
+
             ### For metric loading
             preds = outputs.logits
             if args.mixup > 0:
@@ -281,14 +417,11 @@ def main(args):
     # ================== ZO_Estim ======================
     ZO_Estim = None
     if args.ZO_config_path is not None:
-        # file_path = 'ZO_Estim/ZO_config.yaml'
-        file_path = args.ZO_config_path
-        
-        with open(file_path, 'r') as f:
-            yaml_dict = yaml.safe_load(f)
-        ZO_config = EasyDict(yaml_dict)
-        
-        ZO_Estim = build_ZO_Estim(ZO_config, model=model, )
+        # Load config using new ZOConfig (backward compatible with EasyDict)
+        ZO_config = ZOConfig.from_yaml(args.ZO_config_path)
+
+        # Create ZO estimator (uses new ZO_grad_estimator)
+        ZO_Estim = build_ZO_Estim(ZO_config, model=model)
     # ================== ZO_Estim ======================
 
     # Create unique identifier
