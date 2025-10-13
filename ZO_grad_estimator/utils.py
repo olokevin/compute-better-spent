@@ -24,6 +24,10 @@ class PerturbParam:
     param: nn.Parameter
     layer: Optional[nn.Module] = None
 
+    # Spectral scaling attributes
+    sigma: Optional[float] = None  # Layer-wise perturbation scale
+    lr_mult: Optional[float] = None  # Layer-wise learning rate multiplier
+
 
 @dataclass
 class PerturbLayer:
@@ -36,6 +40,10 @@ class PerturbLayer:
     # For memory-efficient gradient computation
     seed_list: List[int] = None
     scale_factor_list: List[torch.Tensor] = None
+
+    # Spectral scaling attributes
+    sigma: Optional[float] = None  # Layer-wise perturbation scale
+    lr_mult: Optional[float] = None  # Layer-wise learning rate multiplier
 
     def __post_init__(self):
         if self.seed_list is None:
@@ -229,6 +237,142 @@ def create_bwd_pre_hook_replace_grad(ZO_grad_output: torch.Tensor, debug: bool =
         else:
             return (ZO_grad_output,) + grad_output[1:]
     return bwd_pre_hook
+
+
+# ==================== Spectral Scaling Computation ====================
+
+def compute_layer_dimensions(param: nn.Parameter, layer: Optional[nn.Module] = None) -> Tuple[int, int, int]:
+    """
+    Compute input/output dimensions and total parameter count for a layer.
+
+    Returns:
+        (n_in, n_out, d): input dim, output dim, total params
+    """
+    shape = param.shape
+
+    if len(shape) == 2:  # Linear layer: (n_out, n_in)
+        n_out, n_in = shape
+        d = n_in * n_out
+    elif len(shape) == 4:  # Conv2d: (n_out, n_in, k, k)
+        n_out, n_in, k1, k2 = shape
+        d = n_out * n_in * k1 * k2
+    elif len(shape) == 1:  # Bias or LayerNorm
+        n_out = n_in = shape[0]
+        d = n_out
+    else:
+        # Fallback: treat as flattened
+        d = param.numel()
+        n_in = n_out = int(d ** 0.5)
+
+    return n_in, n_out, d
+
+
+def compute_spectral_sigma_wp(n_in: int, n_out: int, d: int, base_sigma: float = 0.01) -> float:
+    """
+    Compute layer-wise sigma for weight perturbation (WP).
+
+    Formula (from spectral scaling paper):
+        σ_WP ∝ 1 / √(n_in + n_out)
+
+    Args:
+        n_in: Input dimension
+        n_out: Output dimension
+        d: Total parameter count (not used in WP, kept for API consistency)
+        base_sigma: Base scaling constant (default 0.01)
+
+    Returns:
+        Layer-wise sigma
+    """
+    import math
+    return base_sigma * math.sqrt(2.0 / (n_in + n_out))
+
+
+def compute_spectral_sigma_np(batch_size: int, n_out: int, base_sigma: float = 0.01) -> float:
+    """
+    Compute layer-wise sigma for node perturbation (NP).
+
+    Formula (from spectral scaling paper):
+        σ_NP ∝ 1 / √batch_size
+
+    Args:
+        batch_size: Batch size
+        n_out: Output activation dimension
+        base_sigma: Base scaling constant (default 0.01)
+
+    Returns:
+        Layer-wise sigma
+    """
+    import math
+    return base_sigma / math.sqrt(batch_size)
+
+
+def compute_spectral_lr_mult_wp(n_in: int, n_out: int, d: int,
+                                 n_sample: int, sigma: float,
+                                 C: float = 1.0, base_lr: float = 1e-3) -> float:
+    """
+    Compute layer-wise learning rate multiplier for weight perturbation (WP).
+
+    From variance analysis:
+        η_ZO = η_FO * √n_sample / (σ * √(C * d))
+
+    From μP scaling (for maintaining spectral norm):
+        η_ℓ ∝ n_out / n_in
+
+    Combined:
+        lr_mult = (n_out / n_in) * √n_sample / (σ * √(C * d))
+
+    Args:
+        n_in: Input dimension
+        n_out: Output dimension
+        d: Total parameter count
+        n_sample: Number of ZO samples
+        sigma: Perturbation scale
+        C: Curvature constant (default 1.0)
+        base_lr: Base learning rate (for reference)
+
+    Returns:
+        Learning rate multiplier relative to base_lr
+    """
+    import math
+
+    # μP scaling component
+    mup_scale = n_out / n_in
+
+    # ZO variance adjustment
+    zo_adjustment = math.sqrt(n_sample) / (sigma * math.sqrt(C * d))
+
+    return mup_scale * zo_adjustment
+
+
+def compute_spectral_lr_mult_np(batch_size: int, n_out: int,
+                                 n_sample: int, sigma: float,
+                                 C: float = 1.0, base_lr: float = 1e-3) -> float:
+    """
+    Compute layer-wise learning rate multiplier for node perturbation (NP).
+
+    From variance analysis:
+        η_ZO = η_FO * √n_sample / (σ * √(C * batch_size * n_out))
+
+    Args:
+        batch_size: Batch size
+        n_out: Output activation dimension
+        n_sample: Number of ZO samples
+        sigma: Perturbation scale
+        C: Curvature constant (default 1.0)
+        base_lr: Base learning rate (for reference)
+
+    Returns:
+        Learning rate multiplier relative to base_lr
+    """
+    import math
+
+    # NP perturbation dimension is batch_size * n_out
+    perturb_dim = batch_size * n_out
+
+    # ZO variance adjustment
+    zo_adjustment = math.sqrt(n_sample) / (sigma * math.sqrt(C * perturb_dim))
+
+    return zo_adjustment
 
 
 # ==================== Model Splitting (for partial forward) ====================

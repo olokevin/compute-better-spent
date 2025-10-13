@@ -20,6 +20,7 @@ from einops import rearrange
 import yaml
 from easydict import EasyDict
 import torch.nn.functional as F
+import sys
 
 # ===== ZO Gradient Estimator (New Implementation) =====
 # Using clean ZO_grad_estimator with backward-compatible names
@@ -37,6 +38,25 @@ DEBUG=True  # When enabled, prints cosine similarity between ZO and BP gradients
 
 OUT_GRAD_DEBUG=False  # Set to True to compare ZO_grad_output with true output gradients (node perturbation only)
 # OUT_GRAD_DEBUG=True  # When enabled, prints cosine similarity between ZO and BP output gradients for each layer
+
+
+class TeeLogger:
+    """Capture stdout to both terminal and a file"""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log_file = open(filepath, 'w')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log_file.write(message)
+        self.log_file.flush()  # Ensure immediate write
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def close(self):
+        self.log_file.close()
 
 
 def train(model, opt, scheduler, loss_fn, epoch, train_loader, ZO_Estim, args):
@@ -217,10 +237,6 @@ def train(model, opt, scheduler, loss_fn, epoch, train_loader, ZO_Estim, args):
                         if name in zo_grads:
                             param.grad = zo_grads[name]
 
-            # Update parameters (ZO doesn't use gradient accumulation)
-            opt.step()
-            opt.zero_grad()
-
             ### For metric loading
             preds = outputs.logits
             if args.mixup > 0:
@@ -350,7 +366,8 @@ def main(args):
     base_config = dict(dim_in=prod(input_shape), dim_out=args.num_classes, depth=args.depth, width=args.width,
                        num_ffn_experts=args.num_ffn_experts, ffn_expansion=base_ffn_expansion, patch_size=args.patch_size,
                        in_channels=args.in_channels, shuffle_pixels=args.shuffle_pixels, heads=args.heads, dim_head=args.dim_head,
-                       attn_mult=args.attn_mult, output_mult=args.output_mult, emb_mult=args.emb_mult, layer_norm=args.layer_norm)
+                       attn_mult=args.attn_mult, output_mult=args.output_mult, emb_mult=args.emb_mult, layer_norm=args.layer_norm,
+                       mlp_activation=args.mlp_activation)
     # target config
     target_config = base_config.copy()
     args.width = int(args.width * args.scale_factor)  # we update args.width to have it logged in wandb
@@ -393,7 +410,33 @@ def main(args):
         base_config["fact_cls"] = fact_cls
         target_config["fact_cls"] = fact_cls
     cola_kwargs = dict(tt_cores=args.tt_cores, tt_rank=args.tt_rank, num_blocks=args.num_blocks, rank_frac=args.rank_frac,
-                       fact_cls=fact_cls, expr=args.expr, init_type=args.init_type, do_sgd_lr=args.optimizer == "sgd")
+                       fact_cls=fact_cls, expr=args.expr, init_type=args.init_type, do_sgd_lr=args.optimizer == "sgd",
+                       low_rank_activation=args.low_rank_activation, actv_between=args.actv_between, actv_output=args.actv_output)
+
+    # Create unique identifier early to set up logging
+    run_name = config_to_name(args)
+    path = os.path.join(args.checkpoint_folder, run_name)
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    # ========== Set up logging to capture initialization ==========
+    # Redirect stdout to both terminal and log file (W&B will capture stdout automatically)
+    log_filename = os.path.join(path, 'model_init_log.txt')
+    tee_logger = TeeLogger(log_filename)
+    old_stdout = sys.stdout
+    sys.stdout = tee_logger
+
+    print("="*80)
+    print("MODEL INITIALIZATION LOG")
+    print("="*80)
+    print(f"Run name: {run_name}")
+    print(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Structure: {struct}")
+    print(f"Base config: {base_config}")
+    print(f"Target config: {target_config}")
+    print(f"CoLA kwargs: {cola_kwargs}")
+    print("="*80)
+
     # initialize scaled up model with some linear layers replaced by cola layers,
     # and create optimizer with appropriately scaled learning rates
     if args.use_wrong_mult:
@@ -411,6 +454,19 @@ def main(args):
     #     info["cola_flops"] += fact_cls.flops
     #     print(fact_cls.layers)
 
+    print("="*80)
+    print("MODEL PARAMETERS")
+    print("="*80)
+    for name, param in model.named_parameters():
+        print(f'{name:40s} | shape={str(param.shape):20s} | numel={param.numel():10d} | requires_grad={param.requires_grad}')
+    print("="*80)
+
+    # Stop capturing and close the log file
+    sys.stdout = old_stdout
+    tee_logger.close()
+    print(f"Model initialization log saved to: {log_filename}")
+    # ========== End of capture ==========
+
     scheduler = get_scheduler(opt, args.scheduler, **args.__dict__)
     loss_fn = CrossEntropyLoss(label_smoothing=args.smooth)
     
@@ -424,15 +480,9 @@ def main(args):
         ZO_Estim = build_ZO_Estim(ZO_config, model=model)
     # ================== ZO_Estim ======================
 
-    # Create unique identifier
-    run_name = config_to_name(args)
-    path = os.path.join(args.checkpoint_folder, run_name)
-
-    # Create folder to store the checkpoints
-    if not os.path.exists(path):
-        os.makedirs(path)
-        with open(path + '/config.txt', 'w') as f:
-            json.dump(args.__dict__, f, indent=2)
+    # Save config file
+    with open(path + '/config.txt', 'w') as f:
+        json.dump(args.__dict__, f, indent=2)
 
     # Get the dataloaders
     local_batch_size = args.batch_size // args.accum_steps
@@ -460,6 +510,10 @@ def main(args):
             config=config,
             tags=["pretrain", args.dataset],
         )
+
+        # Upload model initialization log to wandb Files
+        wandb.save(log_filename, base_path=args.checkpoint_folder)
+        print(f"Model initialization log will be available in W&B Files tab")
 
     compute_per_epoch = info['cola_flops'] * len(train_loader) * args.batch_size
 

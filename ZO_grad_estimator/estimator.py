@@ -11,14 +11,16 @@ Supports:
 import math
 import torch
 import torch.nn as nn
-from typing import Optional, List, Tuple, Any
+from typing import Optional, List, Tuple, Any, Dict
 from .config import ZOConfig
 from .utils import (
     PerturbParam, PerturbLayer,
     build_random_generator,
     find_layers_by_rules, find_params_by_rules,
     create_fwd_hook_add_perturbation, create_fwd_hook_store_output_shape,
-    split_model
+    split_model,
+    compute_layer_dimensions, compute_spectral_sigma_wp, compute_spectral_sigma_np,
+    compute_spectral_lr_mult_wp, compute_spectral_lr_mult_np
 )
 from .objective import ObjectiveFunction
 
@@ -70,9 +72,38 @@ class ZOEstimator(nn.Module):
             )
 
             for idx, (param_name, param, rule_name) in enumerate(matched_params):
-                self.perturb_params.append(
-                    PerturbParam(idx=idx, name=param_name, param=param)
-                )
+                perturb_param = PerturbParam(idx=idx, name=param_name, param=param)
+
+                # Compute spectral scaling if enabled
+                if self.config.en_spectral_scaling:
+                    n_in, n_out, d = compute_layer_dimensions(param)
+
+                    # Compute layer-wise sigma
+                    if self.config.spectral_sigma_method == 'wp_standard':
+                        perturb_param.sigma = compute_spectral_sigma_wp(n_in, n_out, d, self.config.sigma)
+                    else:
+                        perturb_param.sigma = self.config.sigma
+
+                    # Compute layer-wise LR multiplier
+                    if self.config.spectral_lr_method == 'zo_variance_adjusted':
+                        # Use layer-wise sigma if available
+                        sigma_for_lr = perturb_param.sigma if perturb_param.sigma is not None else self.config.sigma
+                        perturb_param.lr_mult = compute_spectral_lr_mult_wp(
+                            n_in, n_out, d,
+                            self.config.n_sample,
+                            sigma_for_lr,
+                            self.config.spectral_C_constant
+                        )
+                    else:
+                        perturb_param.lr_mult = 1.0
+
+                    print(f'    {param_name}: n_in={n_in}, n_out={n_out}, d={d}, '
+                          f'sigma={perturb_param.sigma:.6f}, lr_mult={perturb_param.lr_mult:.4f}')
+                else:
+                    perturb_param.sigma = self.config.sigma
+                    perturb_param.lr_mult = 1.0
+
+                self.perturb_params.append(perturb_param)
 
         # === Activation Perturbation (Node Perturbation) ===
         if self.config.actv_perturb_rules is not None:
@@ -108,6 +139,19 @@ class ZOEstimator(nn.Module):
         """Update the objective function with new data."""
         self.objective_fn = objective_fn
 
+    def get_lr_multipliers(self) -> Dict[str, float]:
+        """
+        Get learning rate multipliers for all parameters with spectral scaling.
+
+        Returns:
+            Dictionary mapping parameter names to LR multipliers
+        """
+        lr_mults = {}
+        for perturb_param in self.perturb_params:
+            if perturb_param.lr_mult is not None:
+                lr_mults[perturb_param.name] = perturb_param.lr_mult
+        return lr_mults
+
     def estimate_grad(self) -> Tuple[Any, torch.Tensor]:
         """
         Main entry point for gradient estimation.
@@ -134,74 +178,133 @@ class ZOEstimator(nn.Module):
             _, old_loss = self.objective_fn(return_loss_reduction='none')
             batch_sz = old_loss.numel()
 
-        # Perturbation loop
-        for i in range(self.config.n_sample):
-            # Generate and apply perturbations
-            seeds = []
-            for perturb_param in self.perturb_params:
-                seed = torch.randint(0, 100000, (1,)).item()
-                seeds.append(seed)
+        # Check if layerwise perturbation is enabled
+        if self.config.en_layerwise_perturbation:
+            # Layerwise: Perturb one parameter at a time
+            for i in range(self.config.n_sample):
+                for perturb_param in self.perturb_params:
+                    # Generate seed and perturbation
+                    seed = torch.randint(0, 100000, (1,)).item()
 
-                # Generate perturbation
-                state = torch.get_rng_state()
-                torch.manual_seed(seed)
-                perturbation = self.rand_gen_fn(perturb_param.param.shape)
-                torch.set_rng_state(state)
+                    state = torch.get_rng_state()
+                    torch.manual_seed(seed)
+                    perturbation = self.rand_gen_fn(perturb_param.param.shape)
+                    torch.set_rng_state(state)
 
-                # Apply perturbation
+                    # Apply perturbation with layer-wise sigma
+                    sigma = perturb_param.sigma if perturb_param.sigma is not None else self.config.sigma
+                    with torch.no_grad():
+                        perturb_param.param.add_(sigma * perturbation)
+
+                    # Forward pass
+                    with torch.no_grad():
+                        _, pos_loss = self.objective_fn(return_loss_reduction='none')
+                        self.forward_counter += 1
+
+                    # Compute loss difference
+                    if self.config.estimate_method == 'forward':
+                        loss_diff = pos_loss - old_loss
+                        # Restore parameter
+                        with torch.no_grad():
+                            perturb_param.param.sub_(sigma * perturbation)
+                    elif self.config.estimate_method == 'antithetic':
+                        # Remove positive, add negative
+                        with torch.no_grad():
+                            perturb_param.param.sub_(2 * sigma * perturbation)
+
+                        with torch.no_grad():
+                            _, neg_loss = self.objective_fn(return_loss_reduction='none')
+                            self.forward_counter += 1
+
+                        loss_diff = (pos_loss - neg_loss) / 2.0
+
+                        # Restore to original
+                        with torch.no_grad():
+                            perturb_param.param.add_(sigma * perturbation)
+                    else:
+                        raise ValueError(f"Unknown estimate_method: {self.config.estimate_method}")
+
+                    # Gradient estimate: g ≈ (1/σ) * Δloss * u
+                    grad_est = (loss_diff.mean() / sigma) * perturbation
+
+                    if perturb_param.param.grad is None:
+                        perturb_param.param.grad = grad_est
+                    else:
+                        perturb_param.param.grad += grad_est
+
+        else:
+            # Simultaneous perturbation: Perturb all parameters at once
+            for i in range(self.config.n_sample):
+                # Generate and apply perturbations
+                seeds = []
+                for perturb_param in self.perturb_params:
+                    seed = torch.randint(0, 100000, (1,)).item()
+                    seeds.append(seed)
+
+                    # Generate perturbation
+                    state = torch.get_rng_state()
+                    torch.manual_seed(seed)
+                    perturbation = self.rand_gen_fn(perturb_param.param.shape)
+                    torch.set_rng_state(state)
+
+                    # Apply perturbation with layer-wise sigma
+                    sigma = perturb_param.sigma if perturb_param.sigma is not None else self.config.sigma
+                    with torch.no_grad():
+                        perturb_param.param.add_(sigma * perturbation)
+
+                # Forward pass
                 with torch.no_grad():
-                    perturb_param.param.add_(self.config.sigma * perturbation)
+                    _, pos_loss = self.objective_fn(return_loss_reduction='none')
+                    self.forward_counter += 1
 
-            # Forward pass
-            with torch.no_grad():
-                _, pos_loss = self.objective_fn(return_loss_reduction='none')
-                self.forward_counter += 1
+                # Compute loss difference
+                if self.config.estimate_method == 'forward':
+                    loss_diff = pos_loss - old_loss
+                elif self.config.estimate_method == 'antithetic':
+                    # Remove positive perturbation, add negative
+                    for perturb_param in self.perturb_params:
+                        state = torch.get_rng_state()
+                        torch.manual_seed(seeds[perturb_param.idx])
+                        perturbation = self.rand_gen_fn(perturb_param.param.shape)
+                        torch.set_rng_state(state)
 
-            # Compute loss difference
-            if self.config.estimate_method == 'forward':
-                loss_diff = pos_loss - old_loss
-            elif self.config.estimate_method == 'antithetic':
-                # Remove positive perturbation, add negative
+                        sigma = perturb_param.sigma if perturb_param.sigma is not None else self.config.sigma
+                        with torch.no_grad():
+                            perturb_param.param.sub_(2 * sigma * perturbation)
+
+                    with torch.no_grad():
+                        _, neg_loss = self.objective_fn(return_loss_reduction='none')
+                        self.forward_counter += 1
+
+                    loss_diff = (pos_loss - neg_loss) / 2.0
+
+                # Remove perturbations
                 for perturb_param in self.perturb_params:
                     state = torch.get_rng_state()
                     torch.manual_seed(seeds[perturb_param.idx])
                     perturbation = self.rand_gen_fn(perturb_param.param.shape)
                     torch.set_rng_state(state)
 
+                    sigma = perturb_param.sigma if perturb_param.sigma is not None else self.config.sigma
+                    sign = 1 if self.config.estimate_method == 'forward' else -1
                     with torch.no_grad():
-                        perturb_param.param.sub_(2 * self.config.sigma * perturbation)
+                        perturb_param.param.sub_(sign * sigma * perturbation)
 
-                with torch.no_grad():
-                    _, neg_loss = self.objective_fn(return_loss_reduction='none')
-                    self.forward_counter += 1
+                # Accumulate gradient
+                for perturb_param in self.perturb_params:
+                    state = torch.get_rng_state()
+                    torch.manual_seed(seeds[perturb_param.idx])
+                    perturbation = self.rand_gen_fn(perturb_param.param.shape)
+                    torch.set_rng_state(state)
 
-                loss_diff = (pos_loss - neg_loss) / 2.0
+                    # Gradient estimate: g ≈ (1/σ) * Δloss * u
+                    sigma = perturb_param.sigma if perturb_param.sigma is not None else self.config.sigma
+                    grad_est = (loss_diff.mean() / sigma) * perturbation
 
-            # Remove perturbations
-            for perturb_param in self.perturb_params:
-                state = torch.get_rng_state()
-                torch.manual_seed(seeds[perturb_param.idx])
-                perturbation = self.rand_gen_fn(perturb_param.param.shape)
-                torch.set_rng_state(state)
-
-                sign = 1 if self.config.estimate_method == 'forward' else -1
-                with torch.no_grad():
-                    perturb_param.param.sub_(sign * self.config.sigma * perturbation)
-
-            # Accumulate gradient
-            for perturb_param in self.perturb_params:
-                state = torch.get_rng_state()
-                torch.manual_seed(seeds[perturb_param.idx])
-                perturbation = self.rand_gen_fn(perturb_param.param.shape)
-                torch.set_rng_state(state)
-
-                # Gradient estimate: g ≈ (1/σ) * Δloss * u
-                grad_est = (loss_diff.mean() / self.config.sigma) * perturbation
-
-                if perturb_param.param.grad is None:
-                    perturb_param.param.grad = grad_est
-                else:
-                    perturb_param.param.grad += grad_est
+                    if perturb_param.param.grad is None:
+                        perturb_param.param.grad = grad_est
+                    else:
+                        perturb_param.param.grad += grad_est
 
         # Scale gradients
         scaling_factor = 1.0 / self.config.n_sample

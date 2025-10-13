@@ -132,14 +132,30 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.d_model, config.ffn_expansion * config.d_model, bias=config.bias)
-        self.gelu = nn.GELU()
+
+        # Set activation function (can be None to disable)
+        mlp_activation = getattr(config, 'mlp_activation', 'gelu')  # default to gelu for backward compatibility
+        if mlp_activation is None or mlp_activation == 'none':
+            self.activation = None
+        elif mlp_activation == 'gelu':
+            self.activation = nn.GELU()
+        elif mlp_activation == 'relu':
+            self.activation = nn.ReLU()
+        elif mlp_activation == 'silu' or mlp_activation == 'swish':
+            self.activation = nn.SiLU()
+        elif mlp_activation == 'tanh':
+            self.activation = nn.Tanh()
+        else:
+            raise ValueError(f'Unknown activation: {mlp_activation}')
+
         self.c_proj = nn.Linear(config.ffn_expansion * config.d_model, config.d_model, bias=config.bias)
         dense_init(self.c_proj, zero_init=True)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = self.gelu(x)
+        if self.activation is not None:
+            x = self.activation(x)
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -174,6 +190,7 @@ class GPTConfig:
     do_qk_ln: bool = False
     split_qkv: bool = False
     axial: bool = False  # use axial / BTT attention
+    mlp_activation: str = 'gelu'  # activation function in MLP blocks ('gelu', 'relu', 'silu', 'tanh', 'none')
 
 
 class GPT(nn.Module):

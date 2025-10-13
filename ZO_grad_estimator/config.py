@@ -32,6 +32,12 @@ class ZOConfig:
     normalize_perturbation: bool = False  # Normalize perturbation to unit norm
     scale: Optional[str] = None  # Gradient scaling: None, 'sqrt_dim', or 'dim'
 
+    # === Spectral Scaling Options ===
+    en_spectral_scaling: bool = False  # Enable layer-wise spectral scaling for sigma and LR
+    spectral_sigma_method: str = 'wp_standard'  # 'wp_standard', 'np_standard', or 'custom'
+    spectral_lr_method: str = 'zo_variance_adjusted'  # 'zo_variance_adjusted', 'fo_baseline', or 'custom'
+    spectral_C_constant: float = 1.0  # Curvature constant C for variance estimation
+
     # === Strategy Flags ===
     en_layerwise_perturbation: bool = False  # Perturb one layer at a time
     en_partial_forward: bool = False  # Use partial forward (requires model support)
@@ -70,6 +76,10 @@ class ZOConfig:
             'quantized': self.quantized,
             'normalize_perturbation': self.normalize_perturbation,
             'scale': self.scale,
+            'en_spectral_scaling': self.en_spectral_scaling,
+            'spectral_sigma_method': self.spectral_sigma_method,
+            'spectral_lr_method': self.spectral_lr_method,
+            'spectral_C_constant': self.spectral_C_constant,
             'en_layerwise_perturbation': self.en_layerwise_perturbation,
             'en_partial_forward': self.en_partial_forward,
             'en_wp_np_mixture': self.en_wp_np_mixture,

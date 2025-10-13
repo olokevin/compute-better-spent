@@ -1,0 +1,58 @@
+# ZO Configuration for CIFAR-10/100 with MLP Model - Spectral Scaling
+# Implements layer-wise sigma and learning rate scaling to ensure stable feature learning
+
+name: ZO_Estim_MC
+obj_fn_type: CIFAR
+
+# ===== Perturbation Parameters =====
+sigma: 0.01                      # Base perturbation magnitude (will be scaled per-layer)
+n_sample: 10                     # Number of random samples per gradient estimate
+estimate_method: antithetic      # 'forward' or 'antithetic'
+sample_method: gaussian          # 'gaussian', 'bernoulli', or 'uniform'
+
+# ===== Optimization Options =====
+signsgd: false                   # Use sign of gradient only
+quantized: false                 # Use quantized perturbations
+normalize_perturbation: false    # Normalize perturbation to unit norm
+scale: null                      # Gradient scaling: null, 'sqrt_dim', or 'dim'
+
+# ===== Spectral Scaling Options =====
+en_spectral_scaling: true        # Enable layer-wise spectral scaling
+spectral_sigma_method: wp_standard  # 'wp_standard' for σ ∝ 1/√(n_in + n_out)
+spectral_lr_method: zo_variance_adjusted  # Adjust LR based on ZO variance
+spectral_C_constant: 1.0         # Curvature constant C for variance estimation
+
+# ===== Strategy Flags =====
+en_layerwise_perturbation: false  # Perturb all params simultaneously (faster)
+en_partial_forward: false         # Use partial forward (requires model support)
+en_wp_np_mixture: false          # Mix weight and node perturbation
+en_pseudo_ZO: false              # Exclude classifier layers
+en_param_commit: false           # Commit param changes during perturbation
+
+# ===== Rule-Based Parameter Selection (Weight Perturbation) =====
+param_perturb_rules:
+  # All parameters in hidden layers
+  hidden_params:
+    name_pattern: 'hidden_layers\.\d'
+
+  # Input layer parameters
+  input_params:
+    name_pattern: 'input_layer'
+
+# ===== Usage =====
+# python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \
+#   --struct=btt --layers=all_but_last \
+#   --ZO_config_path=ZO_grad_estimator/config/zo_cifar_mlp_spectral.yaml \
+#   --lr=3e-3  # Base LR will be automatically scaled per-layer
+
+# ===== Theory =====
+# Spectral Scaling Ensures:
+# 1. Perturbation scale: σ_ℓ ∝ 1/√(n_in + n_out) maintains feature learning condition
+# 2. Learning rate: η_ℓ = (n_out/n_in) * √n_sample / (σ_ℓ * √(C*d)) adjusts for ZO variance
+# 3. Spectral norm: ||ΔW||_* = Θ(√(n_out/n_in)) stays stable across layers
+# 4. Feature evolution: ||h_ℓ||_2 = Θ(√n_ℓ) and ||Δh_ℓ||_2 = Θ(√n_ℓ) preserved
+
+# Expected behavior:
+# - fc1 (10→20): σ ≈ 0.0126, lr_mult ≈ 4.47
+# - fc2 (20→2): σ ≈ 0.0095, lr_mult ≈ 0.11
+# See test_spectral_scaling.py for verification

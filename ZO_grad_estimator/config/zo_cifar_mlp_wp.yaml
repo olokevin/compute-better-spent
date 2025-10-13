@@ -6,7 +6,7 @@ obj_fn_type: CIFAR
 
 # ===== Perturbation Parameters =====
 sigma: 0.01                      # Perturbation magnitude
-n_sample: 1                      # Number of random samples per gradient estimate
+n_sample: 10                     # Number of random samples per gradient estimate (increase for better accuracy)
 estimate_method: antithetic      # 'forward' or 'antithetic'
 sample_method: bernoulli         # 'gaussian', 'bernoulli', or 'uniform'
 
@@ -17,7 +17,7 @@ normalize_perturbation: false    # Normalize perturbation to unit norm
 scale: null                      # Gradient scaling: null, 'sqrt_dim', or 'dim'
 
 # ===== Strategy Flags =====
-en_layerwise_perturbation: false  # Perturb one layer at a time
+en_layerwise_perturbation: true  # Perturb all params simultaneously (faster but noisier than layerwise)
 en_partial_forward: false         # Use partial forward (requires model support)
 en_wp_np_mixture: false          # Mix weight and node perturbation
 en_pseudo_ZO: false              # Exclude classifier layers
@@ -27,11 +27,11 @@ en_param_commit: false           # Commit param changes during perturbation
 param_perturb_rules:
   # All parameters in hidden layers
   hidden_params:
-    name_pattern: 'hidden_layers\.\d+\.(linear1|linear2)\.(weight|bias)'
+    name_pattern: 'hidden_layers\.\d'
 
   # Input layer parameters
   input_params:
-    name_pattern: 'input_layer\.(weight|bias)'
+    name_pattern: 'input_layer'
 
 # ===== Usage =====
 # python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \

@@ -192,7 +192,8 @@ def get_activation_fn(activation):
     else:
         raise ValueError(f'Unknown activation: {activation}')
 
-def build_low_rank_actv(d_in, d_out, rank_frac=0, bias=True, zero_init=False, init_method='µP', activation='gelu', **_):
+def build_low_rank_actv(d_in, d_out, rank_frac=0, bias=True, zero_init=False, init_method='µP', low_rank_activation='gelu',
+                        actv_between=True, actv_output=False, **_):
     assert rank_frac >= 0, 'rank_frac must be non-negative'
     if rank_frac == 0:
         rank_frac = 1 / np.sqrt(min(d_in, d_out))
@@ -211,10 +212,10 @@ def build_low_rank_actv(d_in, d_out, rank_frac=0, bias=True, zero_init=False, in
     cola_init(B, zero_init, init_method=init_method)
 
     # Get activation function
-    actv_fn = get_activation_fn(activation)
+    actv_fn = get_activation_fn(low_rank_activation) if (actv_between or actv_output) else None
 
     # Create LowRankActv operator
-    op = LowRankActv(A, B, actv_fn, shape=(d_in, d_out))
+    op = LowRankActv(A, B, actv_fn, shape=(d_in, d_out), actv_between=actv_between, actv_output=actv_output)
     return CoLALayer(op, bias=bias)
 
 def build_tt(d_in, d_out, tt_cores, tt_rank, permute=False, bias=True, zero_init=False, init_method='µP', **_):
@@ -270,14 +271,21 @@ def build_btt(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False, zero
     return CoLALayer(A, bias=bias)
 
 def build_btt_actv(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False, zero_init=False, normalize=False,
-                   learn_gamma=True, init_method='µP', activation='relu', **_):
-    """Build BTT layer with activation between cores"""
+                   learn_gamma=True, init_method='µP', low_rank_activation='gelu', actv_between=True, actv_output=False, **_):
+    """Build BTT layer with activation between cores and/or at output"""
     assert tt_rank > 0, 'tt_rank must be positive'
     ns, ms = tuple(factorize(d_out, tt_cores)), tuple(factorize(d_in, tt_cores))
     rs = (1, tt_rank, 1)
     shapes = (rs, ms, ns)
     cores = []
-    print(f'BTT-Actv ({activation}) shape: {ms} -> {ns}')
+
+    actv_locations = []
+    if actv_between:
+        actv_locations.append("between")
+    if actv_output:
+        actv_locations.append("output")
+    actv_str = "+".join(actv_locations) if actv_locations else "none"
+    print(f'BTT-Actv ({low_rank_activation}, {actv_str}) shape: {ms} -> {ns}')
 
     for idx in range(tt_cores):
         size = ns[:idx] + ms[idx + 1:] + (rs[idx] * ms[idx], rs[idx + 1] * ns[idx])
@@ -296,9 +304,9 @@ def build_btt_actv(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False,
         cores.append(gamma1)
 
     # Get activation function
-    actv_fn = get_activation_fn(activation)
+    actv_fn = get_activation_fn(low_rank_activation) if (actv_between or actv_output) else None
 
-    A = FasterBTTActv(cores, shapes, actv_fn, normalize)
+    A = FasterBTTActv(cores, shapes, actv_fn, normalize, actv_between=actv_between, actv_output=actv_output)
     if permute:
         P_in = Permutation(torch.randperm(d_in), dtype=A.dtype)
         P_out = Permutation(torch.randperm(d_out), dtype=A.dtype)
@@ -357,13 +365,13 @@ def build_monarch(d_in, d_out, num_blocks=4, bias=True, zero_init=False, init_me
 
 build_fns = {
     'low_rank': build_low_rank,
-    'low_rank_actv': build_low_rank_actv,
+    'low_rank_actv': build_low_rank_actv,  # defaults: actv_between=True, actv_output=False (activation between cores only)
     'kron': build_tt,
     'tt': build_tt,
     'btt_slow': build_btt_slow,
     'btt': lambda *args, **kwargs: build_btt(*args, **kwargs),
     'btt_norm': lambda *args, **kwargs: build_btt(*args, normalize=True, **kwargs),
-    'btt_actv': lambda *args, **kwargs: build_btt_actv(*args, **kwargs),
+    'btt_actv': build_btt_actv,  # defaults: actv_between=True, actv_output=False (activation between cores only)
     'btt_actv_norm': lambda *args, **kwargs: build_btt_actv(*args, normalize=True, **kwargs),
     'monarch': build_monarch,
     'dense': build_dense,

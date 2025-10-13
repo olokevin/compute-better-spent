@@ -58,7 +58,10 @@ def get_training_parser():
     parser.add_argument("--tt_rank", type=int, default=1)
     parser.add_argument("--tt_cores", type=int, default=2)
     parser.add_argument("--num_blocks", type=int, default=4)
-    parser.add_argument("--activation", type=str, default='relu', choices=['relu', 'gelu', 'silu', 'swish', 'tanh'], help="Activation function for actv layers")
+    parser.add_argument("--low_rank_activation", type=str, default='relu', choices=['relu', 'gelu', 'silu', 'swish', 'tanh'], help="Activation function between cores in structured layers (low_rank_actv, btt_actv)")
+    parser.add_argument("--actv_between", default=True, action=argparse.BooleanOptionalAction, help="Apply activation between cores (for low_rank_actv, btt_actv)")
+    parser.add_argument("--actv_output", default=False, action=argparse.BooleanOptionalAction, help="Apply activation at output (for low_rank_actv, btt_actv). Usually False since models already have activations.")
+    parser.add_argument("--mlp_activation", type=str, default='gelu', choices=['relu', 'gelu', 'silu', 'swish', 'tanh', 'none'], help="Activation function in MLP blocks. Use 'none' to disable.")
     parser.add_argument("--aux_loss_weight", type=float, default=0.01)
     parser.add_argument("--spec_penalty_weight", type=float, default=0.)
 
@@ -88,6 +91,7 @@ def get_training_parser():
     parser.add_argument("--wandb", default=True, action=argparse.BooleanOptionalAction, help="Whether to log with wandb")
     parser.add_argument("--wandb_project", default="struct_mlp", type=str, help="Wandb project name")
     parser.add_argument("--wandb_entity", default=None, type=str, help="Wandb entity name")
+    parser.add_argument("--wandb_name_append", default=None, type=str, help="Append to Wandb run name")
 
     # Zeroth-Order Training
     parser.add_argument("--ZO_config_path", default=None, type=str, help="Path to ZO configuration YAML file. If provided, enables zeroth-order gradient estimation")

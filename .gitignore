@@ -5,6 +5,7 @@ beton/
 checkpoints/
 wandb/
 
+test/
 docs/
 *.pdf
 *.md

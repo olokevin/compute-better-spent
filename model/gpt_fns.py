@@ -39,12 +39,16 @@ def construct_configs(
     lm_head_struct=None,
     lm_head_tt_rank=None,
     lm_head_rank_frac=None,
+    low_rank_activation='relu',
+    actv_between=True,
+    actv_output=False,
+    mlp_activation='gelu',
     **_,
 ):
     device_type = 'cuda' if 'cuda' in device else 'cpu'
     base_config = dict(n_layer=n_layer, n_head=base_n_head, d_head=base_d_head, d_model=base_d_model, d_embd=base_d_embd,
                        block_size=block_size, bias=bias, vocab_size=vocab_size, dropout=dropout, do_qk_ln=do_qk_ln,
-                       split_qkv=split_qkv, ffn_expansion=base_ffn_expansion, axial=False)
+                       split_qkv=split_qkv, ffn_expansion=base_ffn_expansion, axial=False, mlp_activation=mlp_activation)
     target_config = base_config.copy()
     target_config['n_head'] = n_head
     target_config['d_head'] = d_head
@@ -58,7 +62,8 @@ def construct_configs(
         lm_head_rank_frac = rank_frac
     cola_kwargs = dict(tt_cores=tt_cores, tt_rank=tt_rank, num_blocks=num_blocks, rank_frac=rank_frac, every_n_fwds=every_n_fwds,
                        do_qk_ln=do_qk_ln, lm_head_struct=lm_head_struct, lm_head_tt_rank=lm_head_tt_rank,
-                       lm_head_rank_frac=lm_head_rank_frac)
+                       lm_head_rank_frac=lm_head_rank_frac, low_rank_activation=low_rank_activation, actv_between=actv_between,
+                       actv_output=actv_output)
     optim_kwargs = {
         "opt_name": opt_name,
         "weight_decay": weight_decay,

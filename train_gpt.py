@@ -37,6 +37,26 @@ from model.gpt_fns import construct_configs
 from nn.cola_nn import cola_parameterize
 from nn.cola_nn import get_model_summary_and_flops
 from tqdm import tqdm
+import sys
+
+
+class TeeLogger:
+    """Capture stdout to both terminal and a file"""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log_file = open(filepath, 'w')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log_file.write(message)
+        self.log_file.flush()  # Ensure immediate write
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def close(self):
+        self.log_file.close()
 
 # -----------------------------------------------------------------------------
 eval_interval, log_interval, eval_iters, eval_only = 2000, 1, 200, False
@@ -65,6 +85,8 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 compile = True
 struct = "none"
 tt_cores, tt_rank, num_blocks, rank_frac, every_n_fwds = 2, 1, 4, 0.2, 100
+low_rank_activation, actv_between, actv_output = 'relu', True, False  # activation between cores in structured layers
+mlp_activation = 'gelu'  # activation in MLP blocks ('gelu', 'relu', 'silu', 'tanh', 'none')
 lm_head_struct = ''
 lm_head_tt_rank = -1
 lm_head_rank_frac = -1.
@@ -113,6 +135,26 @@ dataset_size = len(train_data)
 print(f"Total tokens: {dataset_size:,d}")
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=data_dtype, mode='r')
 
+# Create output directory early
+if master_process:
+    os.makedirs(out_dir, exist_ok=True)
+
+# ========== Set up logging to capture initialization ==========
+# Redirect stdout to both terminal and log file (W&B will capture stdout automatically)
+log_filename = os.path.join(out_dir, 'model_init_log.txt')
+tee_logger = TeeLogger(log_filename)
+old_stdout = sys.stdout
+sys.stdout = tee_logger
+
+print("="*80)
+print("MODEL INITIALIZATION LOG")
+print("="*80)
+print(f"Run name: {wandb_run_name}")
+print(f"Timestamp: {timestamp}")
+print(f"Structure: {struct}")
+print(f"Config: {config}")
+print("="*80)
+
 if len(ckpt_path) == 0:
     base_config, target_config, cola_kwargs, optim_kwargs = construct_configs(**config)
     model, optimizer = cola_parameterize(GPT, base_config, init_lr, target_config=target_config, struct=struct,
@@ -151,6 +193,20 @@ non_emb_flops_per_token = non_emb_flops / block_size
 info['non_emb_flops'] = non_emb_flops
 print(param_str)
 print(f'Non-emb FLOPs: {non_emb_flops // 1e6} M')
+
+print("="*80)
+print("MODEL PARAMETERS")
+print("="*80)
+for name, param in model.named_parameters():
+    print(f'{name:40s} | shape={str(param.shape):20s} | numel={param.numel():10d} | requires_grad={param.requires_grad}')
+print("="*80)
+
+# Stop capturing and close the log file
+sys.stdout = old_stdout
+tee_logger.close()
+print(f"Model initialization log saved to: {log_filename}")
+# ========== End of capture ==========
+
 config.update(info)
 
 # write config to log.txt one variable per line
@@ -179,6 +235,10 @@ get_epoch = partial(get_epoch, dataset_size=dataset_size, block_size=block_size,
 if wandb_log and master_process:
     import wandb
     wandb.init(entity="ap-team", project=wandb_project, name=wandb_run_name, config=config)
+
+    # Upload model initialization log to wandb Files
+    wandb.save(log_filename, base_path=os.path.dirname(out_dir))
+    print(f"Model initialization log will be available in W&B Files tab")
 
 ckpt_count, ckpt_max = 1, 100
 X, Y = get_batch('train')

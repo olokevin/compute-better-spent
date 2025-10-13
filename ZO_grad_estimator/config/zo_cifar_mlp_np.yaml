@@ -6,7 +6,7 @@ obj_fn_type: CIFAR
 
 # ===== Perturbation Parameters =====
 sigma: 0.01                      # Perturbation magnitude
-n_sample: 1                      # Number of random samples per gradient estimate
+n_sample: 10                      # Number of random samples per gradient estimate
 estimate_method: antithetic      # 'forward' or 'antithetic'
 sample_method: bernoulli         # 'gaussian', 'bernoulli', or 'uniform'
 

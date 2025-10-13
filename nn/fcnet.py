@@ -15,7 +15,7 @@ class CappedList():
             self.buffer.append(x.cpu())
 
 class MLPBlock(nn.Module):
-    def __init__(self, width, residual, layer_norm, residual_mult=1, use_bias=True):
+    def __init__(self, width, residual, layer_norm, residual_mult=1, use_bias=True, activation='gelu'):
         super().__init__()
         self.linear1 = nn.Linear(width, width * 4, bias=use_bias)
         self.linear2 = nn.Linear(width * 4, width, bias=use_bias)
@@ -26,13 +26,28 @@ class MLPBlock(nn.Module):
         self.layer_norm = layer_norm
         if layer_norm:
             self.ln = nn.LayerNorm(width)
-        self.gelu = nn.GELU()
+
+        # Set activation function (can be None to disable)
+        if activation is None or activation == 'none':
+            self.activation = None
+        elif activation == 'gelu':
+            self.activation = nn.GELU()
+        elif activation == 'relu':
+            self.activation = nn.ReLU()
+        elif activation == 'silu' or activation == 'swish':
+            self.activation = nn.SiLU()
+        elif activation == 'tanh':
+            self.activation = nn.Tanh()
+        else:
+            raise ValueError(f'Unknown activation: {activation}')
 
     def forward(self, x):
         x0 = x
         if self.layer_norm:
             x = self.ln(x)
-        x = self.gelu(self.linear1(x))
+        x = self.linear1(x)
+        if self.activation is not None:
+            x = self.activation(x)
         x = self.linear2(x) * self.residual_mult
         if self.residual:
             x = x + x0
@@ -41,7 +56,7 @@ class MLPBlock(nn.Module):
 
 class MLP(nn.Module):
     def __init__(self, dim_in, dim_out, depth, width, residual=True, layer_norm=True, shuffle_pixels=True, attn_mult=1,
-                 output_mult=1, emb_mult=1, use_bias=True, **_):
+                 output_mult=1, emb_mult=1, use_bias=True, mlp_activation='gelu', **_):
         super().__init__()
         self.shuffle_pixels = shuffle_pixels
         local_rng = np.random.default_rng(42)
@@ -55,7 +70,8 @@ class MLP(nn.Module):
         # hidden layers
         self.hidden_layers = nn.ModuleList()
         for _ in range(depth):
-            self.hidden_layers.append(MLPBlock(width, residual, layer_norm, residual_mult=attn_mult, use_bias=use_bias))
+            self.hidden_layers.append(MLPBlock(width, residual, layer_norm, residual_mult=attn_mult, use_bias=use_bias,
+                                               activation=mlp_activation))
         # output layer
         self.output_layer = nn.Linear(width, dim_out, bias=use_bias)
         dense_init(self.output_layer, zero_init=True)

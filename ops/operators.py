@@ -168,18 +168,25 @@ class FasterBTT(LinearOperator):
 
 class FasterBTTActv(LinearOperator):
     """
-    BTT with activation between cores: v @ W0 @ activation() @ W1
+    BTT with activation between cores and/or at output:
+    - actv_between=True, actv_output=True: v @ W0 @ activation() @ W1
+    - actv_between=False, actv_output=True: activation(v @ W0 @ W1)
+    - actv_between=True, actv_output=True: activation(v @ W0 @ activation() @ W1)
 
     Args:
         Ms (array_like): Cores of the BTT (2 cores: W0, W1, optional gamma params)
         shapes (tuple): Shapes (rs, ms, ns)
-        activation (callable): Activation function to apply after first core
+        activation (callable): Activation function to apply
         normalize (bool): If True, normalize the cores
+        actv_between (bool): If True, apply activation between cores
+        actv_output (bool): If True, apply activation at the output
     """
-    def __init__(self, Ms, shapes, activation, normalize=False):
+    def __init__(self, Ms, shapes, activation, normalize=False, actv_between=True, actv_output=True):
         self.Ms = Ms
         self.activation = activation
         self.normalize = normalize
+        self.actv_between = actv_between
+        self.actv_output = actv_output
         dtype = self.Ms[0].dtype
         self.rs, self.ms, self.ns = shapes
         shape = (prod(self.ms), prod(self.ns))
@@ -218,14 +225,20 @@ class FasterBTTActv(LinearOperator):
         out1 = out1.transpose(0, 2).contiguous()
         out1 = out1.reshape(self.ns[0], batch_n, self.ms[1] * self.rs[1])
 
-        # Apply activation
-        out1 = self.activation(out1)
+        # Apply activation between cores if enabled
+        if self.actv_between and self.activation is not None:
+            out1 = self.activation(out1)
 
         # Second core multiplication
         out2 = torch.bmm(out1, W1)
         out2 = out2.reshape(self.ns[0], batch_n, self.ns[1], self.rs[2])
         out2 = out2.transpose(0, 1)
         out2 = out2.reshape(batch_n, -1)
+
+        # Apply activation at output if enabled
+        if self.actv_output and self.activation is not None:
+            out2 = self.activation(out2)
+
         return out2
 
     def __str__(self):
@@ -233,19 +246,25 @@ class FasterBTTActv(LinearOperator):
 
 class LowRankActv(LinearOperator):
     """
-    Low-rank operator with activation: v @ A @ activation(B)
-    where A is d_in x rank and B is rank x d_out
+    Low-rank operator with activation between matrices and/or at output:
+    - actv_between=True, actv_output=True: v @ A @ activation() @ B
+    - actv_between=False, actv_output=True: activation(v @ A @ B)
+    - actv_between=True, actv_output=True: activation(v @ A @ activation() @ B)
 
     Args:
         A (Tensor): First low-rank matrix (d_in x rank)
         B (Tensor): Second low-rank matrix (rank x d_out)
-        activation (callable): Activation function to apply after A
+        activation (callable): Activation function to apply
         shape (tuple): Shape of the full operator (d_in, d_out)
+        actv_between (bool): If True, apply activation between A and B
+        actv_output (bool): If True, apply activation at the output
     """
-    def __init__(self, A, B, activation, shape):
+    def __init__(self, A, B, activation, shape, actv_between=True, actv_output=True):
         self.A = A
         self.B = B
         self.activation = activation
+        self.actv_between = actv_between
+        self.actv_output = actv_output
         dtype = self.A.dtype
         super().__init__(dtype, shape)
 
@@ -253,10 +272,18 @@ class LowRankActv(LinearOperator):
         # v: (batch, d_in)
         # First multiply by A: (batch, d_in) @ (d_in, rank) -> (batch, rank)
         out = v @ self.A
-        # Apply activation
-        out = self.activation(out)
+
+        # Apply activation between matrices if enabled
+        if self.actv_between and self.activation is not None:
+            out = self.activation(out)
+
         # Multiply by B: (batch, rank) @ (rank, d_out) -> (batch, d_out)
         out = out @ self.B
+
+        # Apply activation at output if enabled
+        if self.actv_output and self.activation is not None:
+            out = self.activation(out)
+
         return out
 
     def __str__(self):
