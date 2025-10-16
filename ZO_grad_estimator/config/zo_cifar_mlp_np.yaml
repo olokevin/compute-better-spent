@@ -14,7 +14,7 @@ sample_method: bernoulli         # 'gaussian', 'bernoulli', or 'uniform'
 signsgd: false                   # Use sign of gradient only
 quantized: false                 # Use quantized perturbations
 normalize_perturbation: false    # Normalize perturbation to unit norm
-scale: null                      # Gradient scaling: null, 'sqrt_dim', or 'dim'
+scale: sqrt_dim                      # Gradient scaling: null, 'sqrt_dim', or 'dim'
 
 # ===== Strategy Flags =====
 en_layerwise_perturbation: false  # Perturb one layer at a time

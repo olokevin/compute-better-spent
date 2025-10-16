@@ -312,6 +312,17 @@ class ZOEstimator(nn.Module):
             if perturb_param.param.grad is not None:
                 perturb_param.param.grad.mul_(scaling_factor)
 
+                # Apply additional scaling based on config.scale
+                if self.config.scale is not None:
+                    param_dim = perturb_param.param.numel()
+                    if self.config.scale == 'sqrt_dim':
+                        scale_mult = math.sqrt(self.config.n_sample / (self.config.n_sample + param_dim - 1))
+                    elif self.config.scale == 'dim':
+                        scale_mult = (self.config.n_sample / (self.config.n_sample + param_dim - 1))
+                    else:
+                        raise ValueError(f"Unknown scale method: {self.config.scale}")
+                    perturb_param.param.grad.mul_(scale_mult)
+
                 if self.config.signsgd:
                     perturb_param.param.grad = torch.sign(perturb_param.param.grad)
 
@@ -344,6 +355,23 @@ class ZOEstimator(nn.Module):
 
         # Perturbation loop
         scaling_factor = 1.0 / (self.config.n_sample * batch_sz)
+
+        # Apply gradient scaling based on config.scale
+        # Compute total activation dimension across all layers
+        if self.config.scale is not None:
+            total_actv_dim = 0
+            for perturb_layer in self.perturb_layers:
+                output_shape = perturb_layer.layer.output_shape
+                layer_actv_dim = torch.tensor(output_shape).prod().item() / batch_sz
+                total_actv_dim += layer_actv_dim
+
+            if self.config.scale == 'sqrt_dim':
+                scale_mult = math.sqrt(batch_sz * self.config.n_sample / (batch_sz * self.config.n_sample + total_actv_dim - 1))
+            elif self.config.scale == 'dim':
+                scale_mult = (batch_sz * self.config.n_sample / (batch_sz * self.config.n_sample + total_actv_dim - 1))
+            else:
+                raise ValueError(f"Unknown scale method: {self.config.scale}")
+            scaling_factor *= scale_mult
 
         for i in range(self.config.n_sample):
             # Assign random seeds to each layer

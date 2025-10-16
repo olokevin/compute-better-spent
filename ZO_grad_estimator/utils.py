@@ -230,7 +230,7 @@ def create_bwd_pre_hook_replace_grad(ZO_grad_output: torch.Tensor, debug: bool =
         if debug:
             import torch.nn.functional as F
             cos_sim = F.cosine_similarity(grad_output[0].reshape(-1), ZO_grad_output.reshape(-1), dim=0)
-            print(f'Cosine similarity between true grad and ZO grad: {cos_sim:.4f}')
+            print(f'Cosine similarity between true grad_output and ZO grad_output: {cos_sim:.4f}')
 
         if len(grad_output) == 1:
             return (ZO_grad_output,)

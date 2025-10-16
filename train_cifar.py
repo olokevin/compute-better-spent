@@ -261,6 +261,7 @@ def train(model, opt, scheduler, loss_fn, epoch, train_loader, ZO_Estim, args):
                     aux_losses.append(module.load_balancing_loss)
             aux_loss = sum(aux_losses) / len(aux_losses) if aux_losses else 0
 
+        ### Standard Backpropagation-based training
         else:
             preds = model(ims)
             if args.mixup > 0:
