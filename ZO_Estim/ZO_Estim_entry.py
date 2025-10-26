@@ -325,6 +325,8 @@ def build_obj_fn(obj_fn_type, **kwargs):
         obj_fn = PZO_ObjFnLM(**kwargs)
     elif obj_fn_type == 'CIFAR':
         obj_fn = ObjFnCIFAR(**kwargs)
+    elif obj_fn_type == 'CIFAR_PZO':
+        obj_fn = PZOObjFnCIFAR(**kwargs)
     else:
         raise NotImplementedError(f"Unknown obj_fn_type: {obj_fn_type}")
     return obj_fn
@@ -479,6 +481,10 @@ class ObjFnCIFAR:
         self.loss_fn = loss_fn
         self.args = args
 
+        # Store reference to the layer before classifier for PZO
+        # This will be set by _find_pre_classifier_layer()
+        self.pre_classifier_layer = None
+
     def _compute_loss(self, preds, reduction='mean'):
         """
         Compute loss with optional mixup support.
@@ -585,3 +591,222 @@ class ObjFnCIFAR:
         output = Output(preds)
 
         return output, loss
+
+
+class PZOObjFnCIFAR(ObjFnCIFAR):
+    """
+    Pseudo-ZO Objective function for CIFAR classification.
+
+    This extends ObjFnCIFAR to support pseudo-ZO optimization by extracting
+    hidden states from the last hidden layer (before the classifier) and computing
+    gradients with respect to those hidden states.
+
+    The key difference from LM is that CIFAR models don't have explicit
+    `output_hidden_states` parameter, so we use forward hooks to extract
+    the activations from the pre-classifier layer.
+
+    Args:
+        Same as ObjFnCIFAR
+
+    Example:
+        >>> obj_fn = PZOObjFnCIFAR(model, ims, targs, loss_fn, args)
+        >>> output, output_grad, outputs, loss = obj_fn(return_loss_reduction='pzo')
+        >>> hidden_states = obj_fn.get_hidden_states()
+    """
+
+    def __init__(self, model, ims, targs, loss_fn, args):
+        super().__init__(model, ims, targs, loss_fn, args)
+        self._find_pre_classifier_layer()
+
+    def _find_pre_classifier_layer(self):
+        """
+        Find the layer immediately before the classifier/output layer.
+
+        For MLP models:
+            - The last hidden layer is: hidden_layers[-1]
+            - The classifier is: output_layer
+
+        For ViT models:
+            - The last layer in transformer is: transformer.layers[-1]
+            - Then there's pooling and mlp_head
+            - We want the output after transformer.norm
+
+        Returns the module that outputs hidden states before classification.
+        """
+        # Check model type
+        model_type = type(self.model).__name__
+
+        if model_type == 'MLP':
+            # For MLP, we want the output after the last hidden layer
+            if hasattr(self.model, 'hidden_layers') and len(self.model.hidden_layers) > 0:
+                self.pre_classifier_layer = self.model.hidden_layers[-1]
+            else:
+                # Fallback: use input_layer
+                self.pre_classifier_layer = self.model.input_layer
+
+        elif model_type == 'ViT':
+            # For ViT, we want the output after transformer (before pooling and mlp_head)
+            if hasattr(self.model, 'transformer'):
+                self.pre_classifier_layer = self.model.transformer
+            else:
+                raise ValueError("ViT model doesn't have transformer attribute")
+
+        else:
+            # Generic fallback: find the last module that's not the output layer
+            modules = list(self.model.named_children())
+            if len(modules) > 1:
+                # Assume last module is classifier, second-to-last is pre-classifier
+                self.pre_classifier_layer = modules[-2][1]
+            else:
+                raise ValueError(f"Cannot determine pre-classifier layer for model type: {model_type}")
+
+    def get_hidden_states(self):
+        """
+        Extract hidden states from the layer before the classifier.
+
+        This performs a forward pass and captures the output of the pre-classifier layer.
+
+        Returns:
+            torch.Tensor: Hidden states, shape (batch_size, hidden_dim) for MLP
+                         or (batch_size, hidden_dim) for ViT (after pooling)
+        """
+        model_type = type(self.model).__name__
+
+        if model_type == 'MLP':
+            # For MLP, run forward up to and including the last hidden layer
+            x = self.ims.reshape(self.ims.shape[0], -1)
+            if self.model.shuffle_pixels:
+                x = x[:, self.model.pixel_indices]
+
+            # Input layer
+            x = nn.functional.gelu(self.model.input_layer(x) * self.model.emb_mult)
+
+            # Hidden layers
+            for layer in self.model.hidden_layers:
+                x = layer(x)
+
+            # x now contains the hidden states before output_layer
+            return x
+
+        elif model_type == 'ViT':
+            # For ViT, run forward up to and including transformer, then pool
+            x = self.model.to_patch_embedding(self.ims)
+            b, n, _ = x.shape
+
+            from einops import repeat
+            cls_tokens = repeat(self.model.cls_token, '() n d -> b n d', b=b)
+            x = torch.cat((cls_tokens, x), dim=1)
+            x += self.model.pos_embedding[:, :(n + 1)]
+            x = x * self.model.emb_mult
+            x = self.model.dropout(x)
+
+            # Transformer forward
+            x = self.model.transformer(x)
+
+            # Pooling (same as in ViT forward)
+            x = x.mean(dim=1) if self.model.pool == 'mean' else x[:, 0]
+
+            x = self.model.to_latent(x)
+
+            # x now contains the hidden states before mlp_head
+            return x
+
+        else:
+            raise NotImplementedError(f"get_hidden_states not implemented for model type: {model_type}")
+
+    def get_grad_hidden_states(self, hidden_states):
+        """
+        Compute gradients w.r.t. hidden states.
+
+        This takes hidden states as input (with requires_grad=True),
+        runs them through the classifier, computes loss, and returns
+        the gradient of loss w.r.t. hidden states.
+
+        Args:
+            hidden_states (torch.Tensor): Hidden states from get_hidden_states(),
+                                          with requires_grad=True
+
+        Returns:
+            torch.Tensor: Gradients w.r.t. hidden states, same shape as input
+        """
+        hidden_states.requires_grad = True
+
+        model_type = type(self.model).__name__
+
+        if model_type == 'MLP':
+            # Run through output layer
+            preds = self.model.output_layer(hidden_states) * self.model.output_mult
+
+        elif model_type == 'ViT':
+            # Run through mlp_head
+            preds = self.model.mlp_head(hidden_states) * self.model.output_mult
+
+        else:
+            raise NotImplementedError(f"get_grad_hidden_states not implemented for model type: {model_type}")
+
+        # Compute loss
+        loss = self._compute_loss(preds, reduction='mean')
+
+        # Compute gradients with respect to hidden_states
+        grad_hidden_states = torch.autograd.grad(loss, hidden_states, create_graph=False)[0]
+
+        return grad_hidden_states
+
+    def get_mask(self):
+        """
+        Get mask for pseudo-ZO (LM-specific, not used for CIFAR).
+
+        Returns None for CIFAR models.
+        """
+        return None
+
+    def __call__(self, return_loss_reduction='mean', detach_idx=-1, **kwargs):
+        """
+        Execute forward pass and loss computation.
+
+        For pseudo-ZO mode (return_loss_reduction='pzo' or 'pzo_nograd'),
+        this extracts hidden states and computes gradients w.r.t. them.
+
+        Args:
+            return_loss_reduction (str): How to reduce the loss
+                - 'mean': Return mean loss (scalar)
+                - 'none': Return per-sample losses (for ZO estimation)
+                - 'pzo': Return (output, output_grad, outputs, loss) for pseudo-ZO
+                - 'pzo_nograd': Return only output for pseudo-ZO (no grad computation)
+            detach_idx (int): Layer index to detach gradient flow (not used for CIFAR)
+            **kwargs: Additional arguments
+
+        Returns:
+            For 'pzo' mode: (output, output_grad, outputs, loss)
+                - output: Hidden states before classifier
+                - output_grad: Gradient w.r.t. hidden states
+                - outputs: Full output object with logits
+                - loss: Computed loss
+
+            For 'pzo_nograd' mode: output (hidden states only)
+
+            For other modes: Same as ObjFnCIFAR
+        """
+        if return_loss_reduction == 'pzo':
+            # Pseudo-ZO mode: return hidden states and their gradients
+            # Get hidden states
+            hidden_states = self.get_hidden_states()
+
+            # Compute gradients w.r.t. hidden states
+            grad_hidden_states = self.get_grad_hidden_states(hidden_states.detach())
+
+            # Also compute full forward for loss tracking
+            output, loss = super().__call__(return_loss_reduction='mean', **kwargs)
+
+            # Return format compatible with get_pseudo_actv_ZO_gradient
+            # output = hidden states, output_grad = grad w.r.t. hidden states
+            return hidden_states.detach(), grad_hidden_states, output, loss
+
+        elif return_loss_reduction == 'pzo_nograd':
+            # Pseudo-ZO mode without gradient computation (for perturbed forwards)
+            hidden_states = self.get_hidden_states()
+            return hidden_states.detach()
+
+        else:
+            # Standard mode: delegate to parent class
+            return super().__call__(return_loss_reduction=return_loss_reduction, **kwargs)

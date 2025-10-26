@@ -5,8 +5,8 @@ name: ZO_Estim_MC
 
 # ===== Perturbation Parameters =====
 sigma: 0.01                      # Perturbation magnitude
-n_sample: 1                     # Number of random samples per gradient estimate
-estimate_method: antithetic      # 'forward' or 'antithetic'
+n_sample: 100                     # Number of random samples per gradient estimate
+estimate_method: forward      # 'forward' or 'antithetic'
 sample_method: bernoulli         # 'gaussian', 'bernoulli', or 'uniform'
 
 # ===== Optimization Options =====
@@ -23,7 +23,7 @@ obj_fn_type: CIFAR
 en_layerwise_perturbation: false  # false = perturb all layers at once (faster)
 en_partial_forward: false         # Enable partial forward (only with layerwise=true)
 en_wp_np_mixture: false
-en_pseudo_ZO: false
+en_pseudo_ZO: false              # Exclude classifier layers from perturbation
 
 # ===== RULE-BASED LAYER SELECTION =====
 # Choose ONE mode: param_perturb_rules OR actv_perturb_rules
@@ -33,11 +33,12 @@ actv_perturb_rules:
   # Rule 1: All hidden layer linears (when using CoLA/structured matrices)
   # When you run with --struct=btt or --struct=low_rank, nn.Linear becomes CoLALayer
   hidden_cola_layers:
-    name_pattern: '^hidden_layers\.\d+\.(linear1|linear2)$'
+    # name_pattern: '^hidden_layers\.\d+\.(linear1|linear2)$'
+    name_pattern: '^hidden_layers\.1+\.linear1$'
 
   # Rule 2: Input layer (if it's a CoLALayer after cola_parameterize)
-  input_cola_layer:
-    name_pattern: '^input_layer$'
+  # input_cola_layer:
+  #   name_pattern: '^input_layer$'
 
   # Note: Exclude output_layer by not matching it
   # The pattern '^input_layer$' only matches 'input_layer' exactly
@@ -48,6 +49,7 @@ actv_perturb_rules:
   #   - hidden_layers.2.linear2
   #   - etc.
   # But NOT 'output_layer'
+  
 
 # --- Mode 2: Parameter Perturbation (Alternative) ---
 # Uncomment to use parameter perturbation instead of activation perturbation

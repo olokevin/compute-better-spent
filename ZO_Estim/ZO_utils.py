@@ -158,7 +158,7 @@ def default_create_bwd_pre_hook_ZO_grad(ZO_grad_output, debug=False):
             ### [CLS] token
             # print(f'{F.cosine_similarity(grad_output[0][0].reshape(-1), ZO_grad_output[0].reshape(-1), dim=0)}')
             
-            # print(f'{torch.linalg.norm(ZO_grad_output.reshape(-1)) / torch.linalg.norm(grad_output[0].reshape(-1))}')
+            print(f'{torch.linalg.norm(ZO_grad_output.reshape(-1)) / torch.linalg.norm(grad_output[0].reshape(-1))}')
         if len(grad_output) == 1:
             return (ZO_grad_output,)
         else:

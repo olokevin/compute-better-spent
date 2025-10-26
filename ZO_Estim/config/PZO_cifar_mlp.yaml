@@ -1,0 +1,137 @@
+# ZO Configuration for CIFAR-10/100 with MLP Model
+# Uses rule-based layer selection with regex patterns
+
+name: ZO_Estim_MC
+
+# ===== Perturbation Parameters =====
+sigma: 0.01                      # Perturbation magnitude
+n_sample: 10                     # Number of random samples per gradient estimate
+estimate_method: forward      # 'forward' or 'antithetic'
+sample_method: bernoulli         # 'gaussian', 'bernoulli', or 'uniform'
+
+# ===== Optimization Options =====
+signsgd: false
+quantized: false
+scale: null
+normalize_perturbation: false
+en_param_commit: false
+
+# ===== Objective Function =====
+obj_fn_type: CIFAR_PZO
+
+# ===== Perturbation Strategy =====
+en_layerwise_perturbation: false  # false = perturb all layers at once (faster)
+en_partial_forward: false         # Enable partial forward (only with layerwise=true)
+en_wp_np_mixture: false
+en_pseudo_ZO: true              # Exclude classifier layers from perturbation
+
+### Advanced: Pseudo-ZO Settings (optional) ###
+obj_fn_type: CIFAR_PZO
+en_pseudo_ZO: true
+pzo_momentum: 0
+pzo_detach_idx: -1
+
+# ===== RULE-BASED LAYER SELECTION =====
+# Choose ONE mode: param_perturb_rules OR actv_perturb_rules
+
+# --- Mode 1: Activation Perturbation (RECOMMENDED for structured matrices) ---
+actv_perturb_rules:
+  # Rule 1: All hidden layer linears (when using CoLA/structured matrices)
+  # When you run with --struct=btt or --struct=low_rank, nn.Linear becomes CoLALayer
+  hidden_cola_layers:
+    # name_pattern: '^hidden_layers\.\d+\.(linear1|linear2)$'
+    name_pattern: '^hidden_layers\.1+\.linear1$'
+
+  # Rule 2: Input layer (if it's a CoLALayer after cola_parameterize)
+  # input_cola_layer:
+  #   name_pattern: '^input_layer$'
+
+  # Note: Exclude output_layer by not matching it
+  # The pattern '^input_layer$' only matches 'input_layer' exactly
+  # The pattern 'hidden_layers\.\d+\.(linear1|linear2)' matches:
+  #   - hidden_layers.0.linear1
+  #   - hidden_layers.0.linear2
+  #   - hidden_layers.1.linear1
+  #   - hidden_layers.2.linear2
+  #   - etc.
+  # But NOT 'output_layer'
+  
+
+# --- Mode 2: Parameter Perturbation (Alternative) ---
+# Uncomment to use parameter perturbation instead of activation perturbation
+# param_perturb_rules:
+#   # All parameters in hidden layers
+#   hidden_params:
+#     name_pattern: 'hidden_layers\.\d+\.(linear1|linear2)\.(weight|bias)'
+#
+#   # Input layer parameters
+#   input_params:
+#     name_pattern: 'input_layer\.(weight|bias)'
+#
+#   # Exclude output layer by not matching it
+
+# ===== LEGACY MODE (for backward compatibility) =====
+# If you don't use rules, these will be used:
+# actv_perturb_block_idx_list: all  # Uncomment for legacy activation perturbation
+# param_perturb_block_idx_list: null
+
+# ===== MLP Architecture Reference =====
+# When training CIFAR with MLP (--model=MLP), the model structure is:
+#
+# MLP(
+#   input_layer: Linear(3072, width)           ← Can be replaced by CoLALayer
+#   hidden_layers: ModuleList(
+#     (0): MLPBlock(
+#       linear1: Linear(width, width*4)        ← Can be replaced by CoLALayer
+#       linear2: Linear(width*4, width)        ← Can be replaced by CoLALayer
+#       ln: LayerNorm(width)                   [if layer_norm=True]
+#       gelu: GELU()
+#     )
+#     (1): MLPBlock(...)
+#     ...
+#   )
+#   output_layer: Linear(width, 10)            ← Usually kept as nn.Linear
+# )
+#
+# When you run with --struct=btt --layers=all_but_last:
+# - input_layer: becomes CoLALayer(BTT)
+# - hidden_layers.*.linear1: becomes CoLALayer(BTT)
+# - hidden_layers.*.linear2: becomes CoLALayer(BTT)
+# - output_layer: stays as nn.Linear
+#
+# The rules above will match all CoLALayer instances automatically!
+
+# ===== Usage Examples =====
+#
+# 1. Train MLP with BTT and ZO:
+#    python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \
+#      --struct=btt --layers=all_but_last --ZO_config_path=ZO_Estim/ZO_config_cifar_mlp.yaml
+#
+# 2. Train MLP with low_rank_actv and ZO:
+#    python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \
+#      --struct=low_rank_actv --layers=all_but_last --ZO_config_path=ZO_Estim/ZO_config_cifar_mlp.yaml
+#
+# 3. Dense model with ZO (for comparison):
+#    python train_cifar.py --dataset=cifar10 --model=MLP --width=64 --depth=3 \
+#      --struct=dense --ZO_config_path=ZO_Estim/ZO_config_cifar_mlp.yaml
+#    Note: With dense, there are no CoLALayers, so you may need to modify rules to match nn.Linear
+
+# ===== Advanced: Specify Type Filter =====
+# You can optionally specify 'type' to filter by layer class:
+# actv_perturb_rules:
+#   hidden_cola_layers:
+#     name_pattern: '^hidden_layers\.\d+\.(linear1|linear2)$'
+#     type: CoLALayer  # or ['CoLALayer'] for single type
+#   input_cola_layer:
+#     name_pattern: '^input_layer$'
+#     type: CoLALayer
+#
+# Multiple types:
+#   mixed_layers:
+#     name_pattern: '.*'
+#     type: ['CoLALayer', 'Linear']  # Match either CoLALayer OR Linear
+#
+# Available type strings: 'CoLALayer', 'Linear', 'Conv2d', 'LayerNorm',
+#                         'BatchNorm2d', 'ParameterList', 'ModuleList'
+#
+# Note: Type filtering is optional. If omitted, only name_pattern is used.
