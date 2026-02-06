@@ -35,6 +35,7 @@ def construct_configs(
     beta1,
     beta2,
     device,
+    decomp_mode='square',
     axial=False,
     lm_head_struct=None,
     lm_head_tt_rank=None,
@@ -60,8 +61,9 @@ def construct_configs(
         lm_head_struct = struct
         lm_head_tt_rank = tt_rank
         lm_head_rank_frac = rank_frac
-    cola_kwargs = dict(tt_cores=tt_cores, tt_rank=tt_rank, num_blocks=num_blocks, rank_frac=rank_frac, every_n_fwds=every_n_fwds,
-                       do_qk_ln=do_qk_ln, lm_head_struct=lm_head_struct, lm_head_tt_rank=lm_head_tt_rank,
+    cola_kwargs = dict(tt_cores=tt_cores, tt_rank=tt_rank, decomp_mode=decomp_mode, num_blocks=num_blocks,
+                       rank_frac=rank_frac, every_n_fwds=every_n_fwds, do_qk_ln=do_qk_ln,
+                       lm_head_struct=lm_head_struct, lm_head_tt_rank=lm_head_tt_rank,
                        lm_head_rank_frac=lm_head_rank_frac, low_rank_activation=low_rank_activation, actv_between=actv_between,
                        actv_output=actv_output)
     optim_kwargs = {

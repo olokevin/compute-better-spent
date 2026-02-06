@@ -57,6 +57,8 @@ def get_training_parser():
     parser.add_argument("--rank_frac", type=float, default=0)
     parser.add_argument("--tt_rank", type=int, default=1)
     parser.add_argument("--tt_cores", type=int, default=2)
+    parser.add_argument("--decomp_mode", type=str, default="square",
+                        choices=["square", "input_one_block", "output_one_block"])
     parser.add_argument("--num_blocks", type=int, default=4)
     parser.add_argument("--low_rank_activation", type=str, default='relu', choices=['relu', 'gelu', 'silu', 'swish', 'tanh'], help="Activation function between cores in structured layers (low_rank_actv, btt_actv)")
     parser.add_argument("--actv_between", default=True, action=argparse.BooleanOptionalAction, help="Apply activation between cores (for low_rank_actv, btt_actv)")
@@ -82,6 +84,36 @@ def get_training_parser():
     parser.add_argument("--mixup", default=0.8, type=float, help="Strength of mixup")
     parser.add_argument("--maximum_steps", default=int(1e10), type=int, help="Maximum steps in synthetic data training")
 
+    # Muon optimizer configs
+    parser.add_argument("--muon_momentum", default=0.95, type=float, help="Muon momentum")
+    parser.add_argument("--muon_nesterov", action=argparse.BooleanOptionalAction, default=True, help="Muon Nesterov momentum")
+    parser.add_argument("--muon_ns_steps", default=5, type=int, help="Muon Newton-Schulz steps")
+    parser.add_argument("--muon_rms_scaling", action=argparse.BooleanOptionalAction, default=True, help="Muon RMS scaling")
+    parser.add_argument("--muon_nuclear_scaling", action=argparse.BooleanOptionalAction, default=False, help="Muon nuclear scaling")
+    parser.add_argument(
+        "--muon_polar_method",
+        default="polarexpress",
+        type=str,
+        choices=["Keller", "Jiacheng", "polarexpress", "fast_polarexpress", "svd-exact"],
+        help="Muon polar factorization method",
+    )
+    parser.add_argument("--muon_adamw_betas", nargs=2, type=float, default=(0.95, 0.95), help="Muon AdamW betas")
+    parser.add_argument("--muon_adamw_eps", default=1e-8, type=float, help="Muon AdamW epsilon")
+    parser.add_argument("--muon_split_heads", action=argparse.BooleanOptionalAction, default=False, help="Muon split heads")
+    parser.add_argument("--muon_split_qkv", action=argparse.BooleanOptionalAction, default=False, help="Muon split QKV")
+    parser.add_argument("--muon_nheads", default=None, type=int, help="Muon number of heads (required if split_heads)")
+    parser.add_argument("--muon_adjust_lr_method", default="default", type=str, help="Muon LR adjust method")
+    parser.add_argument("--muon_structured_adjust_lr_method", default="default", type=str, help="Muon structured LR adjust method")
+    parser.add_argument(
+        "--muon_structured_ortho_method",
+        default="default",
+        type=str,
+        help="Muon structured orthogonalization method",
+    )
+    parser.add_argument("--muon_enable_mup_retraction", action=argparse.BooleanOptionalAction, default=False, help="Muon muP retraction to spectral norm 1")
+    parser.add_argument("--muon_svd_cutoff", default=None, type=float, help="Muon SVD cutoff (svd-exact)")
+    parser.add_argument("--muon_svd_reverse", action=argparse.BooleanOptionalAction, default=False, help="Muon SVD reverse (svd-exact)")
+
 
     # Logging
     parser.add_argument("--calculate_stats", type=int, default=1, help="Frequence of calculating stats")
@@ -89,7 +121,7 @@ def get_training_parser():
     parser.add_argument("--save_freq", type=int, default=50, help="Save frequency")
     parser.add_argument("--save", action=argparse.BooleanOptionalAction, default=False, help="Whether to save checkpoints")
     parser.add_argument("--wandb", default=True, action=argparse.BooleanOptionalAction, help="Whether to log with wandb")
-    parser.add_argument("--wandb_project", default="struct_mlp", type=str, help="Wandb project name")
+    parser.add_argument("--wandb_project", default="struct_mlp_muon", type=str, help="Wandb project name")
     parser.add_argument("--wandb_entity", default=None, type=str, help="Wandb entity name")
     parser.add_argument("--wandb_name_append", default=None, type=str, help="Append to Wandb run name")
     parser.add_argument("--wandb_name_override", default=None, type=str, help="Override to Wandb run name")

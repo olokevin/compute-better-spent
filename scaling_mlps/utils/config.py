@@ -13,7 +13,7 @@ def config_to_name(args):
         #     cola = f"{cola}_rank{args.rank_frac}"
         # elif "tt" in args.struct:
         #     cola = f"{cola}_rank{args.tt_rank}"
-        cola = os.path.join(cola, args.layers)
+        # cola = os.path.join(cola, args.layers)
         return os.path.join(args.dataset, f"{args.model}_d{args.depth}_w{args.width}", cola, f"{args.optimizer}_lr{args.lr}")
 
 

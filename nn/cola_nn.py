@@ -58,6 +58,27 @@ def cola_init(tensor, zero_init=False, init_method='µP'):
             # sqrt(d_out / d_in) spectral norm
             std = np.sqrt(1 / tensor.d_in) * min(1, np.sqrt(tensor.d_out / tensor.d_in))
             tensor.normal_(0, std)
+        elif init_method == 'mup_btt':
+            cola_struct = getattr(tensor, "cola_struct", None)
+            cola_role = getattr(tensor, "cola_role", None)
+            shape_info = getattr(tensor, "cola_shape_info", None)
+            if cola_struct in {"btt", "btt_actv"} and cola_role in {"btt_r", "btt_l"} and shape_info is not None:
+                # 2-core BTT init as stacked low-rank block factors.
+                # Right factors: din = m0, dout = r
+                # Left factors: din = r, dout = n1
+                ns0 = shape_info.get("n") if cola_role == "btt_r" else shape_info.get("a")
+                r = shape_info["rank"]
+                if cola_role == "btt_r":
+                    m0 = shape_info["m"]
+                    std = np.sqrt(1 / ns0) * np.sqrt(1 / m0) * min(1, np.sqrt(r / m0))
+                else:
+                    n1 = shape_info["n"]
+                    std = np.sqrt(1 / ns0) * np.sqrt(1 / r) * min(1, np.sqrt(n1 / r))
+                tensor.normal_(0, std)
+            else:
+                # Fallback to µP if tensor isn't a 2-core BTT factor.
+                std = np.sqrt(1 / tensor.d_in) * min(1, np.sqrt(tensor.d_out / tensor.d_in))
+                tensor.normal_(0, std)
         else:
             raise ValueError(f'Unknown init method {init_method}')
 
@@ -90,6 +111,9 @@ class CoLALayer(nn.Module):
         # e.g. permutations are excluded
         self.cola_tensors = []
         for t in cola_tensors:
+            cola_struct = getattr(t, "cola_struct", None)
+            cola_role = getattr(t, "cola_role", None)
+            cola_shape_info = getattr(t, "cola_shape_info", None)
             if is_cola_param(t):
                 if t.dim() > 0:
                     assert hasattr(t, 'd_in'), f'Learnable CoLA parameter {t} must have d_in attribute'
@@ -104,9 +128,21 @@ class CoLALayer(nn.Module):
                     t.d_in = d_in
                     t.d_out = d_out
                     t.lr_mult = lr_mult
+                    if cola_struct is not None:
+                        t.cola_struct = cola_struct
+                    if cola_role is not None:
+                        t.cola_role = cola_role
+                    if cola_shape_info is not None:
+                        t.cola_shape_info = cola_shape_info
                 else:
                     t = nn.Parameter(t)
                     t.lr_mult = None
+                    if cola_struct is not None:
+                        t.cola_struct = cola_struct
+                    if cola_role is not None:
+                        t.cola_role = cola_role
+                    if cola_shape_info is not None:
+                        t.cola_shape_info = cola_shape_info
                 self.cola_tensors.append(t)
                 self.op_params.append(t)
             else:
@@ -171,9 +207,11 @@ def build_low_rank(d_in, d_out, rank_frac=0, bias=True, zero_init=False, init_me
     U = torch.randn(d_in, rank)
     U.d_in, U.d_out = d_in, rank
     U.in_dims, U.out_dims = (0,), (1,)
+    U.cola_struct = "low_rank"
     V = torch.randn(rank, d_out)
     V.d_in, V.d_out = rank, d_out
     V.in_dims, V.out_dims = (0,), (1,)
+    V.cola_struct = "low_rank"
     cola_init(U, init_method=init_method)
     cola_init(V, zero_init, init_method=init_method)
     A = Dense(U) @ Dense(V)
@@ -203,12 +241,14 @@ def build_low_rank_actv(d_in, d_out, rank_frac=0, bias=True, zero_init=False, in
     A = torch.randn(d_in, rank)
     A.d_in, A.d_out = d_in, rank
     A.in_dims, A.out_dims = (0,), (1,)
+    A.cola_struct = "low_rank_actv"
     cola_init(A, init_method=init_method)
 
     # Create matrix B (rank x d_out)
     B = torch.randn(rank, d_out)
     B.d_in, B.d_out = rank, d_out
     B.in_dims, B.out_dims = (0,), (1,)
+    B.cola_struct = "low_rank_actv"
     cola_init(B, zero_init, init_method=init_method)
 
     # Get activation function
@@ -230,6 +270,17 @@ def build_tt(d_in, d_out, tt_cores, tt_rank, permute=False, bias=True, zero_init
         core.d_out = ms[idx] * rank_next
         core.in_dims = (0, 1)
         core.out_dims = (2, 3)
+        core.cola_struct = "tt"
+        core.cola_role = "tt_core"
+        core.cola_shape_info = {
+            "n": ns[idx],
+            "m": ms[idx],
+            "rank_prev": rank_prev,
+            "rank_next": rank_next,
+            "tt_rank": tt_rank,
+            "idx": idx,
+            "tt_cores": tt_cores,
+        }
         cola_init(core, zero_init and idx == tt_cores - 1, init_method=init_method)
         cores.append(core)
 
@@ -241,9 +292,34 @@ def build_tt(d_in, d_out, tt_cores, tt_rank, permute=False, bias=True, zero_init
     return CoLALayer(A, bias=bias)
 
 def build_btt(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False, zero_init=False, normalize=False, learn_gamma=True,
-                  init_method='µP', **_):
+                  init_method='µP', decomp_mode='square', **_):
+    '''
+    ms[1]: how many input blocks
+    ms[0]: input block dim
+    ns[0]: how many output blocks
+    ns[1]: output block dim
+    
+    btt_r
+    - m: input block dim
+    - n: how many output blocks
+    - b: how many input blocks
+
+    btt_l
+    - a: how many output blocks
+    - b: how many input blocks
+    - n: output block dim
+    '''
     assert tt_rank > 0, 'tt_rank must be positive'
-    ns, ms = tuple(factorize(d_out, tt_cores)), tuple(factorize(d_in, tt_cores))
+    assert decomp_mode in ('square', 'input_one_block', 'output_one_block'), f'Unknown decomp_mode: {decomp_mode}'
+
+    ns = list(factorize(d_out, tt_cores))
+    ms = list(factorize(d_in, tt_cores))
+    if tt_cores == 2:
+        if decomp_mode == 'input_one_block':
+            ms[0], ms[1] = d_in, 1
+        elif decomp_mode == 'output_one_block':
+            ns[0], ns[1] = 1, d_out
+    ns, ms = tuple(ns), tuple(ms)
     rs = (1, tt_rank, 1)
     shapes = (rs, ms, ns)
     cores = []
@@ -255,6 +331,13 @@ def build_btt(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False, zero
         core.d_out = ns[idx] * rs[idx + 1]
         core.in_dims = (-2,)
         core.out_dims = (-1,)
+        core.cola_struct = "btt"
+        if idx == 0:
+            core.cola_role = "btt_r"
+            core.cola_shape_info = {"m": ms[0], "n": ns[0], "rank": tt_rank, "b": ms[1]}
+        else:
+            core.cola_role = "btt_l"
+            core.cola_shape_info = {"a": ns[0], "rank": tt_rank, "b": ms[1], "n": ns[1]}
         cola_init(core, zero_init and idx == tt_cores - 1, init_method=init_method)
         cores.append(core)
 
@@ -294,6 +377,13 @@ def build_btt_actv(d_in, d_out, tt_cores=2, tt_rank=1, bias=True, permute=False,
         core.d_out = ns[idx] * rs[idx + 1]
         core.in_dims = (-2,)
         core.out_dims = (-1,)
+        core.cola_struct = "btt_actv"
+        if idx == 0:
+            core.cola_role = "btt_r"
+            core.cola_shape_info = {"m": ms[0], "n": ns[0], "rank": tt_rank, "b": ms[1]}
+        else:
+            core.cola_role = "btt_l"
+            core.cola_shape_info = {"a": ns[0], "rank": tt_rank, "b": ms[1], "n": ns[1]}
         cola_init(core, zero_init and idx == tt_cores - 1, init_method=init_method)
         cores.append(core)
 
@@ -581,6 +671,14 @@ def materialize_model(model, lr_mults):
 def adjust_lr_and_create_optimizer(named_parameters, lr, extra_lr_mult_fn, optim_kwargs):
     wd = optim_kwargs['weight_decay'] if 'weight_decay' in optim_kwargs else 0.0
     device_type = optim_kwargs.pop("device_type") if "device_type" in optim_kwargs else "cuda"
+    opt_name = optim_kwargs.pop("opt_name") if "opt_name" in optim_kwargs else "AdamW"
+    if opt_name.lower() == "muon":
+        from optimizers.muon import Muon
+        named_params = list(named_parameters)
+        muon_kwargs = optim_kwargs.copy()
+        muon_kwargs.setdefault("weight_decay", wd)
+        return Muon(named_params, lr=lr, **muon_kwargs)
+
     param_groups = []
     for name, param in named_parameters:
         if hasattr(param, 'override_lr'):
@@ -603,7 +701,6 @@ def adjust_lr_and_create_optimizer(named_parameters, lr, extra_lr_mult_fn, optim
     fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
     use_fused = fused_available and device_type == 'cuda'
     extra_args = dict(fused=True) if use_fused else dict()
-    opt_name = optim_kwargs.pop("opt_name") if "opt_name" in optim_kwargs else "AdamW"
     if opt_name == "AdamW":
         optimizer = AdamW(param_groups, **optim_kwargs, **extra_args)
     elif opt_name == "sgd":

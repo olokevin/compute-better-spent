@@ -1,7 +1,7 @@
 export CUDA_VISIBLE_DEVICES=3
 ds=cifar10 # choose from {cifar10, cifar100}
-# lr=3e-3
-lr=3e-1
+lr=3e-3
+# lr=3e-1
 time_stamp=$(date +%Y%m%d_%H%M%S)
 
 ### Dense ####

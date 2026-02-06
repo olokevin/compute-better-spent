@@ -475,9 +475,11 @@ def main(args):
         fact_cls.sample(expr=args.expr)
         base_config["fact_cls"] = fact_cls
         target_config["fact_cls"] = fact_cls
-    cola_kwargs = dict(tt_cores=args.tt_cores, tt_rank=args.tt_rank, num_blocks=args.num_blocks, rank_frac=args.rank_frac,
-                       fact_cls=fact_cls, expr=args.expr, init_type=args.init_type, do_sgd_lr=args.optimizer == "sgd",
-                       low_rank_activation=args.low_rank_activation, actv_between=args.actv_between, actv_output=args.actv_output)
+    cola_kwargs = dict(tt_cores=args.tt_cores, tt_rank=args.tt_rank, decomp_mode=args.decomp_mode,
+                       num_blocks=args.num_blocks, rank_frac=args.rank_frac, fact_cls=fact_cls, expr=args.expr,
+                       init_type=args.init_type, do_sgd_lr=args.optimizer == "sgd",
+                       low_rank_activation=args.low_rank_activation, actv_between=args.actv_between,
+                       actv_output=args.actv_output)
 
     # Create unique identifier early to set up logging
     run_name = config_to_name(args)
@@ -508,6 +510,29 @@ def main(args):
     if args.use_wrong_mult:
         print("#### WARNING: using wrong mult ####")
     optim_kwargs = {"opt_name": args.optimizer}
+    if args.optimizer == "muon":
+        optim_kwargs.update(
+            weight_decay=args.weight_decay,
+            momentum=args.muon_momentum,
+            nesterov=args.muon_nesterov,
+            ns_steps=args.muon_ns_steps,
+            rms_scaling=args.muon_rms_scaling,
+            nuclear_scaling=args.muon_nuclear_scaling,
+            polar_method=args.muon_polar_method,
+            adamw_betas=tuple(args.muon_adamw_betas),
+            adamw_eps=args.muon_adamw_eps,
+            split_heads=args.muon_split_heads,
+            split_qkv=args.muon_split_qkv,
+            nheads=args.muon_nheads,
+            adjust_lr_method=args.muon_adjust_lr_method,
+            structured_adjust_lr_method=args.muon_structured_adjust_lr_method,
+            structured_ortho_method=args.muon_structured_ortho_method,
+            enable_mup_retraction=args.muon_enable_mup_retraction,
+            polar_args={
+                "svd_cutoff": args.muon_svd_cutoff,
+                "svd_reverse": args.muon_svd_reverse,
+            },
+        )
     model, opt = cola_parameterize(model_builder, base_config, args.lr, target_config=target_config, struct=struct,
                                    layer_select_fn=args.layers, zero_init_fn=zero_init_fn, extra_lr_mult_fn=extra_lr_mult_fn,
                                    device=device, cola_kwargs=cola_kwargs, use_wrong_mult=args.use_wrong_mult, init_method=args.init_method,

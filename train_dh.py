@@ -144,7 +144,8 @@ def main(args):
         return hasattr(weight, 'zero_init') and weight.zero_init
 
     # CoLA structure
-    cola_kwargs = dict(tt_cores=args.tt_cores, tt_rank=args.tt_rank, num_blocks=args.num_blocks, rank_frac=args.rank_frac)
+    cola_kwargs = dict(tt_cores=args.tt_cores, tt_rank=args.tt_rank, decomp_mode=args.decomp_mode,
+                       num_blocks=args.num_blocks, rank_frac=args.rank_frac)
     # initialize scaled up model with some linear layers replaced by cola layers,
     # and create optimizer with appropriately scaled learning rates
     if args.use_wrong_mult:

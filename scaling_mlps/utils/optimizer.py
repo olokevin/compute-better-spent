@@ -16,6 +16,7 @@
 import torch
 from torch.optim.optimizer import Optimizer
 import functools
+from optimizers.muon import Muon
 
 
 class Lion(Optimizer):
@@ -151,6 +152,7 @@ OPTIMIZERS_DICT = {
     "sgd": MomentumSGD,
     "adamw": torch.optim.AdamW,
     "lion": Lion,
+    "muon": Muon,
 }
 
 SCHEDULERS = ["cosine", "none"]

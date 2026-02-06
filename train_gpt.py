@@ -85,6 +85,7 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 compile = True
 struct = "none"
 tt_cores, tt_rank, num_blocks, rank_frac, every_n_fwds = 2, 1, 4, 0.2, 100
+decomp_mode = "square"
 low_rank_activation, actv_between, actv_output = 'relu', True, False  # activation between cores in structured layers
 mlp_activation = 'gelu'  # activation in MLP blocks ('gelu', 'relu', 'silu', 'tanh', 'none')
 lm_head_struct = ''
